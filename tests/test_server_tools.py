@@ -190,12 +190,68 @@ class ServerToolTests(unittest.TestCase):
         )
         self.assertEqual(self.fake.calls, [])
 
-    def test_first_five_core_tools_are_registered_in_this_batch(self):
+    def test_render_returns_png_content_and_forwards_parameters(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            target = root / "renders" / "portrait.png"
+            target.parent.mkdir()
+            target.write_bytes(PNG)
+            self.fake.response = {
+                "success": True,
+                "image_path": str(target),
+                "workdir": str(root),
+                "width": 512,
+                "height": 384,
+            }
+
+            result = server.render(
+                camera="Camera",
+                width=512,
+                height=384,
+                engine="CYCLES",
+                output_path="renders/portrait.png",
+            )
+
+        self.assertFalse(result.isError)
+        self.assertEqual(result.content[1].mimeType, "image/png")
+        self.assertEqual(
+            self.fake.calls,
+            [
+                (
+                    "render",
+                    {
+                        "camera": "Camera",
+                        "width": 512,
+                        "height": 384,
+                        "engine": "CYCLES",
+                        "output_path": "renders/portrait.png",
+                    },
+                )
+            ],
+        )
+
+    def test_render_rejects_invalid_dimensions_before_contacting_blender(self):
+        result = server.render(width=True)
+
+        self.assertTrue(result.isError)
+        self.assertEqual(
+            result.structuredContent["error"]["category"], "VALIDATION_ERROR"
+        )
+        self.assertEqual(self.fake.calls, [])
+
+    def test_first_six_core_tools_are_registered_in_this_batch(self):
         names = sorted(tool.name for tool in server.mcp._tool_manager.list_tools())
 
         self.assertEqual(
             names,
-            ["execute_python", "get_scene_info", "get_status", "open", "save"],
+            [
+                "execute_python",
+                "get_scene_info",
+                "get_status",
+                "open",
+                "render",
+                "save",
+            ],
         )
 
     def test_import_is_silent_on_supported_python_hosts(self):

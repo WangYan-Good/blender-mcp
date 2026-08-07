@@ -8,6 +8,7 @@ import struct
 import threading
 import time
 import traceback
+import uuid
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from typing import Any
@@ -259,6 +260,40 @@ def resolve_managed_path(
     return resolved
 
 
+def validate_image_dimensions(width: int, height: int) -> None:
+    """Validate bounded image dimensions without accepting booleans as ints."""
+    for name, value in (("width", width), ("height", height)):
+        if type(value) is not int or not 64 <= value <= 4096:
+            raise CommandError(
+                "VALIDATION_ERROR",
+                f"{name} must be an integer from 64 to 4096",
+            )
+
+
+def resolve_png_output(
+    output_path: str | None,
+    *,
+    workdir: Path,
+    prefix: str,
+) -> Path:
+    """Resolve a caller path or create a unique managed PNG destination."""
+    if output_path is None:
+        timestamp = time.strftime("%Y%m%d-%H%M%S")
+        output_path = f"renders/{prefix}-{timestamp}-{uuid.uuid4().hex[:8]}.png"
+    elif not isinstance(output_path, str) or not output_path.strip():
+        raise CommandError(
+            "VALIDATION_ERROR", "output_path must be a non-empty string or null"
+        )
+    target = resolve_managed_path(
+        output_path,
+        workdir=workdir,
+        suffix=".png",
+        must_exist=False,
+    )
+    target.parent.mkdir(parents=True, exist_ok=True)
+    return target
+
+
 def get_addon_preferences(context=None):
     """Return this add-on's preferences when Blender has registered them."""
     context = bpy.context if context is None else context
@@ -412,6 +447,7 @@ class BlenderMCPServer:
             "get_scene_info": self.get_scene_info,
             "save": self.save,
             "open": self.open_file,
+            "render": self.render,
         }
         handler = handlers.get(command_type)
         if handler is None:
@@ -686,6 +722,119 @@ class BlenderMCPServer:
             "object_count": len(scene.objects),
             "is_dirty": bool(bpy.data.is_dirty),
         }
+
+    def render(
+        self,
+        camera: str | None = None,
+        width: int = 1024,
+        height: int = 1024,
+        engine: str | None = None,
+        output_path: str | None = None,
+    ) -> dict[str, Any]:
+        """Render the active scene to a managed PNG and restore all settings."""
+        validate_image_dimensions(width, height)
+        if camera is not None and (
+            not isinstance(camera, str) or not camera.strip()
+        ):
+            raise CommandError(
+                "VALIDATION_ERROR", "camera must be a non-empty string or null"
+            )
+        if engine is not None and (
+            not isinstance(engine, str) or not engine.strip()
+        ):
+            raise CommandError(
+                "VALIDATION_ERROR", "engine must be a non-empty string or null"
+            )
+
+        scene = bpy.context.scene
+        settings = scene.render
+        render_camera = (
+            scene.camera if camera is None else bpy.data.objects.get(camera)
+        )
+        if render_camera is None:
+            raise CommandError("NOT_FOUND", "requested render camera was not found")
+        if render_camera.type != "CAMERA":
+            raise CommandError(
+                "VALIDATION_ERROR", "requested object is not a camera"
+            )
+
+        valid_engines = self._render_engine_identifiers(scene)
+        selected_engine = str(settings.engine) if engine is None else engine
+        if selected_engine not in valid_engines:
+            raise CommandError(
+                "VALIDATION_ERROR",
+                f"unsupported render engine: {selected_engine}",
+                details={"supported_engines": valid_engines},
+            )
+
+        workdir = get_configured_workdir()
+        target = resolve_png_output(
+            output_path,
+            workdir=workdir,
+            prefix="render",
+        )
+        image_settings = settings.image_settings
+        snapshot = {
+            "camera": scene.camera,
+            "engine": settings.engine,
+            "filepath": settings.filepath,
+            "resolution_x": settings.resolution_x,
+            "resolution_y": settings.resolution_y,
+            "resolution_percentage": settings.resolution_percentage,
+            "file_format": image_settings.file_format,
+            "color_mode": image_settings.color_mode,
+        }
+        started = time.monotonic()
+        try:
+            scene.camera = render_camera
+            settings.engine = selected_engine
+            settings.filepath = str(target)
+            settings.resolution_x = width
+            settings.resolution_y = height
+            settings.resolution_percentage = 100
+            image_settings.file_format = "PNG"
+            image_settings.color_mode = "RGBA"
+
+            operation = bpy.ops.render.render(write_still=True)
+            if "FINISHED" not in operation:
+                raise CommandError("BLENDER_ERROR", "Blender render was cancelled")
+            if not target.is_file() or target.stat().st_size == 0:
+                raise CommandError(
+                    "BLENDER_ERROR", "Blender did not create the requested PNG"
+                )
+            try:
+                with target.open("rb") as image_file:
+                    signature = image_file.read(8)
+            except OSError as exc:
+                raise CommandError(
+                    "BLENDER_ERROR", "Blender render could not be read"
+                ) from exc
+            if signature != b"\x89PNG\r\n\x1a\n":
+                raise CommandError(
+                    "BLENDER_ERROR", "Blender render output is not a PNG"
+                )
+
+            result = {
+                "success": True,
+                "image_path": str(target),
+                "workdir": str(workdir),
+                "width": width,
+                "height": height,
+                "camera": render_camera.name,
+                "engine": selected_engine,
+                "size_bytes": target.stat().st_size,
+                "duration_ms": round((time.monotonic() - started) * 1000, 3),
+            }
+        finally:
+            scene.camera = snapshot["camera"]
+            settings.engine = snapshot["engine"]
+            settings.filepath = snapshot["filepath"]
+            settings.resolution_x = snapshot["resolution_x"]
+            settings.resolution_y = snapshot["resolution_y"]
+            settings.resolution_percentage = snapshot["resolution_percentage"]
+            image_settings.file_format = snapshot["file_format"]
+            image_settings.color_mode = snapshot["color_mode"]
+        return result
 
 
 class BLENDERMCP_AddonPreferences(bpy.types.AddonPreferences):

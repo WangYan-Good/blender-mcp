@@ -6,9 +6,24 @@ from unittest.mock import patch
 
 from tests.addon_loader import load_addon
 
+PNG = b"\x89PNG\r\n\x1a\n" + b"addon-render-image"
+
 
 class SizedCollection(list):
     pass
+
+
+class ObjectCollection(SizedCollection):
+    def get(self, name):
+        return next((item for item in self if item.name == name), None)
+
+    def __getitem__(self, key):
+        if isinstance(key, str):
+            item = self.get(key)
+            if item is None:
+                raise KeyError(key)
+            return item
+        return super().__getitem__(key)
 
 
 def make_mesh_object(name, vertices, edges, polygons):
@@ -49,6 +64,14 @@ def make_fake_bpy(objects=None):
     ]
     render = types.SimpleNamespace(
         engine="BLENDER_EEVEE_NEXT",
+        filepath="C:/previous/output.png",
+        resolution_x=1920,
+        resolution_y=1080,
+        resolution_percentage=50,
+        image_settings=types.SimpleNamespace(
+            file_format="JPEG",
+            color_mode="RGB",
+        ),
         bl_rna=types.SimpleNamespace(
             properties={"engine": types.SimpleNamespace(enum_items=engine_items)}
         ),
@@ -66,6 +89,7 @@ def make_fake_bpy(objects=None):
         data=types.SimpleNamespace(
             filepath="C:/BlenderMCP/projects/person.blend",
             is_dirty=True,
+            objects=ObjectCollection(objects + [camera]),
             materials=[types.SimpleNamespace(name="Skin", use_nodes=True)],
             collections=[
                 types.SimpleNamespace(name="Characters", objects=objects),
@@ -106,6 +130,35 @@ def install_fake_wm(fake_bpy):
             save_as_mainfile=save_as_mainfile,
             open_mainfile=open_mainfile,
         )
+    )
+    return calls
+
+
+def install_fake_render(fake_bpy, *, status=None, write_file=True):
+    calls = []
+    status = {"FINISHED"} if status is None else status
+
+    def render(**kwargs):
+        settings = fake_bpy.context.scene.render
+        calls.append(
+            {
+                "kwargs": dict(kwargs),
+                "camera": fake_bpy.context.scene.camera.name,
+                "engine": settings.engine,
+                "filepath": settings.filepath,
+                "width": settings.resolution_x,
+                "height": settings.resolution_y,
+                "percentage": settings.resolution_percentage,
+                "file_format": settings.image_settings.file_format,
+                "color_mode": settings.image_settings.color_mode,
+            }
+        )
+        if write_file:
+            Path(settings.filepath).write_bytes(PNG)
+        return status
+
+    fake_bpy.ops = types.SimpleNamespace(
+        render=types.SimpleNamespace(render=render)
     )
     return calls
 
@@ -165,7 +218,7 @@ class AddonCoreCommandTests(unittest.TestCase):
 
         error = caught.exception
         self.assertEqual(error.category, "BLENDER_ERROR")
-        self.assertEqual(error.error_type, "AttributeError")
+        self.assertEqual(error.error_type, "KeyError")
         self.assertEqual(error.details["stdout"], "before\n")
         self.assertIn("Traceback (most recent call last)", error.traceback_text)
         self.assertNotIn("print('before')", error.message)
@@ -324,6 +377,121 @@ class AddonCoreCommandTests(unittest.TestCase):
         self.assertEqual(result["scene"], "OpenedScene")
         self.assertFalse(result["is_dirty"])
         self.assertEqual(result["object_count"], 2)
+
+    def test_render_writes_png_and_restores_all_scene_settings(self):
+        fake_bpy = make_fake_bpy()
+        calls = install_fake_render(fake_bpy)
+        scene = fake_bpy.context.scene
+        original = (
+            scene.camera,
+            scene.render.engine,
+            scene.render.filepath,
+            scene.render.resolution_x,
+            scene.render.resolution_y,
+            scene.render.resolution_percentage,
+            scene.render.image_settings.file_format,
+            scene.render.image_settings.color_mode,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.addon.initialize_workdir(Path(tmp) / "BlenderMCP")
+            with patch.object(self.addon, "bpy", fake_bpy), patch.object(
+                self.addon, "get_configured_workdir", return_value=root
+            ):
+                result = self.server.render(
+                    camera="Camera",
+                    width=640,
+                    height=480,
+                    engine="CYCLES",
+                    output_path="renders/portrait.png",
+                )
+
+            target = root / "renders" / "portrait.png"
+            self.assertEqual(target.read_bytes(), PNG)
+            self.assertEqual(result["image_path"], str(target))
+            self.assertEqual(result["workdir"], str(root))
+            self.assertEqual(result["size_bytes"], len(PNG))
+            self.assertEqual(result["camera"], "Camera")
+            self.assertEqual(result["engine"], "CYCLES")
+            self.assertEqual(
+                calls,
+                [
+                    {
+                        "kwargs": {"write_still": True},
+                        "camera": "Camera",
+                        "engine": "CYCLES",
+                        "filepath": str(target),
+                        "width": 640,
+                        "height": 480,
+                        "percentage": 100,
+                        "file_format": "PNG",
+                        "color_mode": "RGBA",
+                    }
+                ],
+            )
+
+        restored = (
+            scene.camera,
+            scene.render.engine,
+            scene.render.filepath,
+            scene.render.resolution_x,
+            scene.render.resolution_y,
+            scene.render.resolution_percentage,
+            scene.render.image_settings.file_format,
+            scene.render.image_settings.color_mode,
+        )
+        self.assertEqual(restored, original)
+
+    def test_render_failure_still_restores_settings(self):
+        fake_bpy = make_fake_bpy()
+        install_fake_render(fake_bpy, status={"CANCELLED"}, write_file=False)
+        scene = fake_bpy.context.scene
+        original = (
+            scene.render.engine,
+            scene.render.filepath,
+            scene.render.resolution_x,
+            scene.render.resolution_y,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.addon.initialize_workdir(Path(tmp) / "BlenderMCP")
+            with patch.object(self.addon, "bpy", fake_bpy), patch.object(
+                self.addon, "get_configured_workdir", return_value=root
+            ):
+                with self.assertRaises(self.addon.CommandError) as caught:
+                    self.server.render(width=256, height=256, engine="CYCLES")
+
+        self.assertEqual(caught.exception.category, "BLENDER_ERROR")
+        self.assertEqual(
+            (
+                scene.render.engine,
+                scene.render.filepath,
+                scene.render.resolution_x,
+                scene.render.resolution_y,
+            ),
+            original,
+        )
+
+    def test_render_rejects_invalid_dimensions_camera_and_engine(self):
+        fake_bpy = make_fake_bpy()
+        install_fake_render(fake_bpy)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.addon.initialize_workdir(Path(tmp) / "BlenderMCP")
+            with patch.object(self.addon, "bpy", fake_bpy), patch.object(
+                self.addon, "get_configured_workdir", return_value=root
+            ):
+                invalid_calls = (
+                    {"width": True},
+                    {"height": 32},
+                    {"camera": "Missing"},
+                    {"engine": "NOT_AN_ENGINE"},
+                )
+                for params in invalid_calls:
+                    with self.subTest(params=params):
+                        with self.assertRaises(self.addon.CommandError) as caught:
+                            self.server.render(**params)
+                        self.assertIn(
+                            caught.exception.category,
+                            {"VALIDATION_ERROR", "NOT_FOUND"},
+                        )
 
 
 if __name__ == "__main__":

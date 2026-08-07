@@ -175,6 +175,43 @@ def open(path: str, discard_unsaved: bool = False) -> CallToolResult:
     )
 
 
+@mcp.tool(structured_output=False)
+def render(
+    camera: str | None = None,
+    width: int = 1024,
+    height: int = 1024,
+    engine: str | None = None,
+    output_path: str | None = None,
+) -> CallToolResult:
+    """Render a camera view and return metadata plus inline PNG content."""
+    for name, value in (("width", width), ("height", height)):
+        if type(value) is not int or not 64 <= value <= 4096:
+            return validation_error(
+                f"{name} must be an integer from 64 to 4096"
+            )
+    for name, value in (
+        ("camera", camera),
+        ("engine", engine),
+        ("output_path", output_path),
+    ):
+        if value is not None and (
+            not isinstance(value, str) or not value.strip()
+        ):
+            return validation_error(
+                f"{name} must be a non-empty string or null"
+            )
+    return _run_image(
+        "render",
+        {
+            "camera": camera,
+            "width": width,
+            "height": height,
+            "engine": engine,
+            "output_path": output_path,
+        },
+    )
+
+
 def main() -> None:
     """Run the MCP server over stdio."""
     try:
