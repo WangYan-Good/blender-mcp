@@ -37,6 +37,12 @@ batch.
 - Embedded scripts in opened blend files are disabled by default.
 - A single `execute_python` request accepts up to 1 MiB of UTF-8 source, exceeding
   the 256 KiB acceptance requirement.
+- Standard output and standard error are each capped at 2 MiB in the response;
+  truncation is explicit so an accidental print loop cannot exceed the frame
+  limit.
+- The MCP server stays on the maintained 1.x SDK line, pinned to
+  `mcp[cli]>=1.28.1,<2`, and uses direct `CallToolResult` values for mixed text
+  and image content over stdio.
 
 ## 3. Architecture
 
@@ -196,7 +202,9 @@ Success result:
 {
   "success": true,
   "stdout": "...",
+  "stdout_truncated": false,
   "stderr": "...",
+  "stderr_truncated": false,
   "result": null,
   "duration_ms": 12
 }
