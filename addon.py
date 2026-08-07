@@ -212,23 +212,6 @@ def initialize_workdir(workdir: Path) -> Path:
     return root
 
 
-def _canonical_new_output(candidate: Path) -> Path:
-    """Resolve a new path through its nearest existing ancestor."""
-    existing_parent = candidate.parent
-    missing_parts: list[str] = []
-    while not existing_parent.exists():
-        missing_parts.append(existing_parent.name)
-        if existing_parent.parent == existing_parent:
-            raise CommandError(
-                "VALIDATION_ERROR", "output path has no existing ancestor"
-            )
-        existing_parent = existing_parent.parent
-    resolved_parent = existing_parent.resolve(strict=True)
-    for part in reversed(missing_parts):
-        resolved_parent /= part
-    return resolved_parent / candidate.name
-
-
 def _is_within(root: Path, candidate: Path) -> bool:
     normalized_root = os.path.normcase(str(root))
     normalized_candidate = os.path.normcase(str(candidate))
@@ -261,11 +244,11 @@ def resolve_managed_path(
         )
 
     try:
-        resolved = (
-            candidate.resolve(strict=True)
-            if must_exist
-            else _canonical_new_output(candidate)
-        )
+        # ``strict=False`` still resolves every existing symlink, including a
+        # final output path, while permitting parents that will be created.
+        # This prevents a workspace-local link from redirecting a managed
+        # write outside the workspace.
+        resolved = candidate.resolve(strict=must_exist)
     except FileNotFoundError as exc:
         raise CommandError("NOT_FOUND", f"path does not exist: {raw_path}") from exc
 
@@ -427,6 +410,8 @@ class BlenderMCPServer:
             "get_status": self.get_status,
             "execute_python": self.execute_python,
             "get_scene_info": self.get_scene_info,
+            "save": self.save,
+            "open": self.open_file,
         }
         handler = handlers.get(command_type)
         if handler is None:
@@ -619,6 +604,88 @@ class BlenderMCPServer:
                 if obj.type == "CAMERA"
             ]
         return result
+
+    def save(
+        self,
+        path: str,
+        overwrite: bool = False,
+        compress: bool = True,
+    ) -> dict[str, Any]:
+        """Save a blend file inside the managed workspace."""
+        if type(overwrite) is not bool:
+            raise CommandError("VALIDATION_ERROR", "overwrite must be boolean")
+        if type(compress) is not bool:
+            raise CommandError("VALIDATION_ERROR", "compress must be boolean")
+
+        target = resolve_managed_path(
+            path,
+            workdir=get_configured_workdir(),
+            suffix=".blend",
+            must_exist=False,
+        )
+        if target.exists() and not overwrite:
+            raise CommandError(
+                "VALIDATION_ERROR",
+                "blend file already exists; pass overwrite=true to replace it",
+            )
+        target.parent.mkdir(parents=True, exist_ok=True)
+        operation = bpy.ops.wm.save_as_mainfile(
+            filepath=str(target),
+            check_existing=False,
+            compress=compress,
+        )
+        if "FINISHED" not in operation or not target.is_file():
+            raise CommandError(
+                "BLENDER_ERROR", "Blender did not create the requested blend file"
+            )
+        return {
+            "success": True,
+            "path": str(target),
+            "size_bytes": target.stat().st_size,
+            "is_dirty": bool(bpy.data.is_dirty),
+        }
+
+    def open_file(
+        self,
+        path: str,
+        discard_unsaved: bool = False,
+    ) -> dict[str, Any]:
+        """Open a managed blend file without loading UI state or scripts."""
+        if type(discard_unsaved) is not bool:
+            raise CommandError(
+                "VALIDATION_ERROR", "discard_unsaved must be boolean"
+            )
+
+        target = resolve_managed_path(
+            path,
+            workdir=get_configured_workdir(),
+            suffix=".blend",
+            must_exist=True,
+        )
+        if not target.is_file():
+            raise CommandError("NOT_FOUND", f"blend file does not exist: {path}")
+        if bpy.data.is_dirty and not discard_unsaved:
+            raise CommandError(
+                "DIRTY_FILE",
+                "current blend file has unsaved changes; pass discard_unsaved=true to open",
+            )
+
+        operation = bpy.ops.wm.open_mainfile(
+            filepath=str(target),
+            load_ui=False,
+            use_scripts=False,
+        )
+        if "FINISHED" not in operation:
+            raise CommandError("BLENDER_ERROR", "Blender did not open the blend file")
+        scene = bpy.context.scene
+        return {
+            "success": True,
+            "path": str(target),
+            "current_file": str(bpy.data.filepath) if bpy.data.filepath else None,
+            "scene": scene.name,
+            "object_count": len(scene.objects),
+            "is_dirty": bool(bpy.data.is_dirty),
+        }
 
 
 class BLENDERMCP_AddonPreferences(bpy.types.AddonPreferences):

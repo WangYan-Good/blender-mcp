@@ -96,6 +96,28 @@ class AddonContractTests(unittest.TestCase):
 
             self.assertEqual(caught.exception.category, "PATH_OUTSIDE_WORKDIR")
 
+    def test_existing_symlink_cannot_escape_workdir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = self.addon.initialize_workdir(base / "BlenderMCP")
+            outside = base / "outside.blend"
+            outside.write_bytes(b"outside")
+            link = root / "projects" / "linked.blend"
+            try:
+                link.symlink_to(outside)
+            except OSError as exc:
+                self.skipTest(f"symlinks are unavailable: {exc}")
+
+            with self.assertRaises(self.addon.CommandError) as caught:
+                self.addon.resolve_managed_path(
+                    "projects/linked.blend",
+                    workdir=root,
+                    suffix=".blend",
+                    must_exist=False,
+                )
+
+            self.assertEqual(caught.exception.category, "PATH_OUTSIDE_WORKDIR")
+
     def test_wrong_extension_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = self.addon.initialize_workdir(Path(tmp) / "BlenderMCP")

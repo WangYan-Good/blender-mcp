@@ -83,6 +83,33 @@ def make_fake_bpy(objects=None):
     )
 
 
+def install_fake_wm(fake_bpy):
+    calls = {"save": [], "open": []}
+
+    def save_as_mainfile(**kwargs):
+        calls["save"].append(dict(kwargs))
+        path = Path(kwargs["filepath"])
+        path.write_bytes(b"BLENDER")
+        fake_bpy.data.filepath = str(path)
+        fake_bpy.data.is_dirty = False
+        return {"FINISHED"}
+
+    def open_mainfile(**kwargs):
+        calls["open"].append(dict(kwargs))
+        fake_bpy.data.filepath = kwargs["filepath"]
+        fake_bpy.data.is_dirty = False
+        fake_bpy.context.scene.name = "OpenedScene"
+        return {"FINISHED"}
+
+    fake_bpy.ops = types.SimpleNamespace(
+        wm=types.SimpleNamespace(
+            save_as_mainfile=save_as_mainfile,
+            open_mainfile=open_mainfile,
+        )
+    )
+    return calls
+
+
 class AddonCoreCommandTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -209,6 +236,94 @@ class AddonCoreCommandTests(unittest.TestCase):
         self.assertTrue(response["success"])
         self.assertEqual(response["request_id"], "status-request")
         self.assertTrue(response["result"]["ready"])
+
+    def test_save_creates_validated_parent_and_blend_file(self):
+        fake_bpy = make_fake_bpy()
+        calls = install_fake_wm(fake_bpy)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.addon.initialize_workdir(Path(tmp) / "BlenderMCP")
+            with patch.object(self.addon, "bpy", fake_bpy), patch.object(
+                self.addon, "get_configured_workdir", return_value=root
+            ):
+                result = self.server.save(
+                    "projects/round-1/person.blend", compress=False
+                )
+
+            target = root / "projects" / "round-1" / "person.blend"
+            self.assertTrue(target.is_file())
+            self.assertEqual(result["path"], str(target))
+            self.assertEqual(result["size_bytes"], len(b"BLENDER"))
+            self.assertFalse(result["is_dirty"])
+            self.assertEqual(
+                calls["save"],
+                [
+                    {
+                        "filepath": str(target),
+                        "check_existing": False,
+                        "compress": False,
+                    }
+                ],
+            )
+
+    def test_save_refuses_existing_file_without_overwrite(self):
+        fake_bpy = make_fake_bpy()
+        calls = install_fake_wm(fake_bpy)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.addon.initialize_workdir(Path(tmp) / "BlenderMCP")
+            target = root / "projects" / "person.blend"
+            target.write_bytes(b"existing")
+            with patch.object(self.addon, "bpy", fake_bpy), patch.object(
+                self.addon, "get_configured_workdir", return_value=root
+            ):
+                with self.assertRaises(self.addon.CommandError) as caught:
+                    self.server.save("projects/person.blend")
+
+        self.assertEqual(caught.exception.category, "VALIDATION_ERROR")
+        self.assertEqual(calls["save"], [])
+
+    def test_open_refuses_to_discard_dirty_file_by_default(self):
+        fake_bpy = make_fake_bpy()
+        calls = install_fake_wm(fake_bpy)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.addon.initialize_workdir(Path(tmp) / "BlenderMCP")
+            target = root / "projects" / "person.blend"
+            target.write_bytes(b"BLENDER")
+            with patch.object(self.addon, "bpy", fake_bpy), patch.object(
+                self.addon, "get_configured_workdir", return_value=root
+            ):
+                with self.assertRaises(self.addon.CommandError) as caught:
+                    self.server.open_file("projects/person.blend")
+
+        self.assertEqual(caught.exception.category, "DIRTY_FILE")
+        self.assertEqual(calls["open"], [])
+
+    def test_open_with_explicit_discard_disables_ui_and_scripts(self):
+        fake_bpy = make_fake_bpy([make_mesh_object("Head", 8, 12, 6)])
+        calls = install_fake_wm(fake_bpy)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.addon.initialize_workdir(Path(tmp) / "BlenderMCP")
+            target = root / "projects" / "person.blend"
+            target.write_bytes(b"BLENDER")
+            with patch.object(self.addon, "bpy", fake_bpy), patch.object(
+                self.addon, "get_configured_workdir", return_value=root
+            ):
+                result = self.server.open_file(
+                    "projects/person.blend", discard_unsaved=True
+                )
+
+        self.assertEqual(
+            calls["open"],
+            [
+                {
+                    "filepath": str(target),
+                    "load_ui": False,
+                    "use_scripts": False,
+                }
+            ],
+        )
+        self.assertEqual(result["scene"], "OpenedScene")
+        self.assertFalse(result["is_dirty"])
+        self.assertEqual(result["object_count"], 2)
 
 
 if __name__ == "__main__":

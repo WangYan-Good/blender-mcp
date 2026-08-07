@@ -135,10 +135,68 @@ class ServerToolTests(unittest.TestCase):
             result.structuredContent["error"]["category"], "VALIDATION_ERROR"
         )
 
-    def test_only_first_three_core_tools_are_registered_in_this_batch(self):
+    def test_save_forwards_explicit_overwrite_and_compression(self):
+        result = server.save(
+            "projects/person.blend", overwrite=True, compress=False
+        )
+
+        self.assertFalse(result.isError)
+        self.assertEqual(
+            self.fake.calls,
+            [
+                (
+                    "save",
+                    {
+                        "path": "projects/person.blend",
+                        "overwrite": True,
+                        "compress": False,
+                    },
+                )
+            ],
+        )
+
+    def test_save_rejects_non_boolean_options_before_contacting_blender(self):
+        result = server.save("projects/person.blend", overwrite=1)
+
+        self.assertTrue(result.isError)
+        self.assertEqual(
+            result.structuredContent["error"]["category"], "VALIDATION_ERROR"
+        )
+        self.assertEqual(self.fake.calls, [])
+
+    def test_open_defaults_to_preserving_dirty_state(self):
+        result = server.open("projects/person.blend")
+
+        self.assertFalse(result.isError)
+        self.assertEqual(
+            self.fake.calls,
+            [
+                (
+                    "open",
+                    {
+                        "path": "projects/person.blend",
+                        "discard_unsaved": False,
+                    },
+                )
+            ],
+        )
+
+    def test_open_rejects_empty_path_before_contacting_blender(self):
+        result = server.open("")
+
+        self.assertTrue(result.isError)
+        self.assertEqual(
+            result.structuredContent["error"]["category"], "VALIDATION_ERROR"
+        )
+        self.assertEqual(self.fake.calls, [])
+
+    def test_first_five_core_tools_are_registered_in_this_batch(self):
         names = sorted(tool.name for tool in server.mcp._tool_manager.list_tools())
 
-        self.assertEqual(names, ["execute_python", "get_scene_info", "get_status"])
+        self.assertEqual(
+            names,
+            ["execute_python", "get_scene_info", "get_status", "open", "save"],
+        )
 
     def test_import_is_silent_on_supported_python_hosts(self):
         completed = subprocess.run(

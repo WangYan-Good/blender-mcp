@@ -143,6 +143,38 @@ def get_scene_info(
     )
 
 
+@mcp.tool(structured_output=False)
+def save(
+    path: str,
+    overwrite: bool = False,
+    compress: bool = True,
+) -> CallToolResult:
+    """Save a .blend file inside Blender's managed workspace."""
+    if not isinstance(path, str) or not path.strip():
+        return validation_error("path must be a non-empty string")
+    if type(overwrite) is not bool:
+        return validation_error("overwrite must be boolean")
+    if type(compress) is not bool:
+        return validation_error("compress must be boolean")
+    return _run_text(
+        "save",
+        {"path": path, "overwrite": overwrite, "compress": compress},
+    )
+
+
+@mcp.tool(structured_output=False)
+def open(path: str, discard_unsaved: bool = False) -> CallToolResult:
+    """Open a managed .blend file, preserving dirty work unless explicitly discarded."""
+    if not isinstance(path, str) or not path.strip():
+        return validation_error("path must be a non-empty string")
+    if type(discard_unsaved) is not bool:
+        return validation_error("discard_unsaved must be boolean")
+    return _run_text(
+        "open",
+        {"path": path, "discard_unsaved": discard_unsaved},
+    )
+
+
 def main() -> None:
     """Run the MCP server over stdio."""
     try:
