@@ -1,4 +1,5 @@
 import json
+import logging
 import struct
 import unittest
 
@@ -32,6 +33,16 @@ class ScriptedSocket:
 
 
 class ConnectionTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.connection_logger = logging.getLogger("BlenderMCPConnection")
+        cls.previous_disabled = cls.connection_logger.disabled
+        cls.connection_logger.disabled = True
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.connection_logger.disabled = cls.previous_disabled
+
     def test_success_returns_result_and_sends_one_framed_request(self):
         response = encode_frame(
             {
