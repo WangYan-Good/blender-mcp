@@ -1,15 +1,20 @@
 """Blender 5.x add-on for the local Blender MCP core bridge."""
 
 import json
+import io
 import os
 import socket
 import struct
 import threading
+import time
 import traceback
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from typing import Any
 
+import bmesh
 import bpy
+import mathutils
 from bpy.props import BoolProperty, IntProperty, StringProperty
 
 bl_info = {
@@ -143,6 +148,41 @@ def validate_request(request: dict[str, Any]) -> None:
             "params must be an object",
             error_type="ProtocolError",
         )
+
+
+def truncate_utf8(text: str, max_bytes: int = MAX_CAPTURE_BYTES) -> tuple[str, bool]:
+    """Truncate UTF-8 text without returning a partial code point."""
+    encoded = text.encode("utf-8", errors="replace")
+    if len(encoded) <= max_bytes:
+        return text, False
+    return encoded[:max_bytes].decode("utf-8", errors="ignore"), True
+
+
+class CappedTextBuffer(io.TextIOBase):
+    """Text writer that bounds captured output while reporting truncation."""
+
+    def __init__(self, max_bytes: int = MAX_CAPTURE_BYTES) -> None:
+        super().__init__()
+        self.max_bytes = max_bytes
+        self._data = bytearray()
+        self.truncated = False
+
+    def writable(self) -> bool:
+        return True
+
+    def write(self, value: str) -> int:
+        if not isinstance(value, str):
+            raise TypeError("captured output must be text")
+        encoded = value.encode("utf-8", errors="replace")
+        remaining = self.max_bytes - len(self._data)
+        if remaining > 0:
+            self._data.extend(encoded[:remaining])
+        if len(encoded) > remaining:
+            self.truncated = True
+        return len(value)
+
+    def getvalue(self) -> str:
+        return bytes(self._data).decode("utf-8", errors="ignore")
 
 
 def resolve_workdir(
@@ -383,7 +423,11 @@ class BlenderMCPServer:
             }
 
     def _dispatch(self, command_type: str, params: dict[str, Any]) -> dict[str, Any]:
-        handlers: dict[str, Any] = {}
+        handlers: dict[str, Any] = {
+            "get_status": self.get_status,
+            "execute_python": self.execute_python,
+            "get_scene_info": self.get_scene_info,
+        }
         handler = handlers.get(command_type)
         if handler is None:
             raise CommandError(
@@ -392,6 +436,189 @@ class BlenderMCPServer:
                 error_type="UnknownCommand",
             )
         return handler(**params)
+
+    @staticmethod
+    def _render_engine_identifiers(scene) -> list[str]:
+        try:
+            items = scene.render.bl_rna.properties["engine"].enum_items
+            return sorted(str(item.identifier) for item in items)
+        except (AttributeError, KeyError, TypeError):
+            return [str(scene.render.engine)]
+
+    def get_status(self) -> dict[str, Any]:
+        """Report Blender readiness and the add-on's runtime constraints."""
+        scene = bpy.context.scene
+        workdir = get_configured_workdir()
+        return {
+            "success": True,
+            "online": True,
+            "ready": True,
+            "blender_version": str(bpy.app.version_string),
+            "addon_version": ".".join(str(part) for part in bl_info["version"]),
+            "protocol_version": PROTOCOL_VERSION,
+            "current_file": str(bpy.data.filepath) if bpy.data.filepath else None,
+            "is_dirty": bool(bpy.data.is_dirty),
+            "scene": scene.name,
+            "workdir": str(workdir),
+            "render_engines": self._render_engine_identifiers(scene),
+            "image_formats": ["PNG"],
+            "max_code_bytes": MAX_CODE_BYTES,
+            "max_frame_bytes": MAX_FRAME_BYTES,
+        }
+
+    @staticmethod
+    def _json_result(value: Any) -> tuple[Any, str]:
+        try:
+            json.dumps(value, ensure_ascii=False)
+            return value, "json"
+        except (TypeError, ValueError, OverflowError):
+            try:
+                rendered = repr(value)
+            except Exception as exc:
+                rendered = f"<repr failed: {type(exc).__name__}>"
+            return truncate_utf8(rendered, max_bytes=16 * 1024)[0], "repr"
+
+    def execute_python(self, code: str) -> dict[str, Any]:
+        """Execute unrestricted Python in Blender with bounded diagnostics."""
+        if not isinstance(code, str):
+            raise CommandError("VALIDATION_ERROR", "code must be a string")
+        code_size = len(code.encode("utf-8"))
+        if code_size > MAX_CODE_BYTES:
+            raise CommandError(
+                "VALIDATION_ERROR",
+                f"code is {code_size} UTF-8 bytes; maximum is {MAX_CODE_BYTES}",
+            )
+
+        stdout = CappedTextBuffer()
+        stderr = CappedTextBuffer()
+        namespace = {
+            "__name__": "__main__",
+            "bpy": bpy,
+            "bmesh": bmesh,
+            "mathutils": mathutils,
+        }
+        started = time.monotonic()
+        try:
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                compiled = compile(code, "<blender-mcp>", "exec")
+                exec(compiled, namespace)
+        except BaseException as exc:
+            raise CommandError(
+                "BLENDER_ERROR",
+                str(exc),
+                error_type=type(exc).__name__,
+                traceback_text=traceback.format_exc(),
+                details={
+                    "stdout": stdout.getvalue(),
+                    "stdout_truncated": stdout.truncated,
+                    "stderr": stderr.getvalue(),
+                    "stderr_truncated": stderr.truncated,
+                    "duration_ms": round((time.monotonic() - started) * 1000, 3),
+                },
+            ) from exc
+
+        result, serialization = self._json_result(namespace.get("result"))
+        return {
+            "success": True,
+            "stdout": stdout.getvalue(),
+            "stdout_truncated": stdout.truncated,
+            "stderr": stderr.getvalue(),
+            "stderr_truncated": stderr.truncated,
+            "result": result,
+            "result_serialized_as": serialization,
+            "duration_ms": round((time.monotonic() - started) * 1000, 3),
+        }
+
+    @staticmethod
+    def _float_triplet(values) -> list[float]:
+        return [float(values[0]), float(values[1]), float(values[2])]
+
+    def _object_summary(self, obj) -> dict[str, Any]:
+        summary = {
+            "name": obj.name,
+            "type": obj.type,
+            "collections": sorted(collection.name for collection in obj.users_collection),
+            "visible": bool(obj.visible_get()),
+            "hide_render": bool(obj.hide_render),
+            "location": self._float_triplet(obj.location),
+            "rotation": self._float_triplet(obj.rotation_euler),
+            "scale": self._float_triplet(obj.scale),
+        }
+        if obj.type == "MESH" and obj.data is not None:
+            summary["mesh"] = {
+                "vertices": len(obj.data.vertices),
+                "edges": len(obj.data.edges),
+                "polygons": len(obj.data.polygons),
+            }
+        return summary
+
+    def get_scene_info(
+        self,
+        include_objects: bool = True,
+        include_materials: bool = True,
+        include_collections: bool = True,
+        include_cameras: bool = True,
+        max_objects: int = 200,
+    ) -> dict[str, Any]:
+        """Return a deterministic, bounded summary of the active scene."""
+        include_values = {
+            "include_objects": include_objects,
+            "include_materials": include_materials,
+            "include_collections": include_collections,
+            "include_cameras": include_cameras,
+        }
+        for name, value in include_values.items():
+            if type(value) is not bool:
+                raise CommandError("VALIDATION_ERROR", f"{name} must be boolean")
+        if type(max_objects) is not int or not 1 <= max_objects <= 2000:
+            raise CommandError(
+                "VALIDATION_ERROR", "max_objects must be an integer from 1 to 2000"
+            )
+
+        scene = bpy.context.scene
+        active = bpy.context.view_layer.objects.active
+        objects = sorted(scene.objects, key=lambda item: item.name)
+        result: dict[str, Any] = {
+            "success": True,
+            "scene": scene.name,
+            "frame": int(scene.frame_current),
+            "render_engine": str(scene.render.engine),
+            "active_object": active.name if active else None,
+            "selected_objects": sorted(obj.name for obj in bpy.context.selected_objects),
+            "camera": scene.camera.name if scene.camera else None,
+            "object_count": len(objects),
+            "material_count": len(bpy.data.materials),
+            "collection_count": len(bpy.data.collections),
+            "camera_count": sum(obj.type == "CAMERA" for obj in objects),
+            "truncated": bool(include_objects and len(objects) > max_objects),
+        }
+        if include_objects:
+            result["objects"] = [
+                self._object_summary(obj) for obj in objects[:max_objects]
+            ]
+        if include_materials:
+            result["materials"] = [
+                {"name": material.name, "use_nodes": bool(material.use_nodes)}
+                for material in sorted(bpy.data.materials, key=lambda item: item.name)
+            ]
+        if include_collections:
+            result["collections"] = [
+                {"name": collection.name, "object_count": len(collection.objects)}
+                for collection in sorted(
+                    bpy.data.collections, key=lambda item: item.name
+                )
+            ]
+        if include_cameras:
+            result["cameras"] = [
+                {
+                    "name": obj.name,
+                    "projection": str(obj.data.type),
+                    "lens": float(obj.data.lens),
+                }
+                for obj in objects
+                if obj.type == "CAMERA"
+            ]
+        return result
 
 
 class BLENDERMCP_AddonPreferences(bpy.types.AddonPreferences):

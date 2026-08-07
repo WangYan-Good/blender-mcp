@@ -38,6 +38,7 @@ def load_addon():
 
     requests = types.ModuleType("requests")
     requests.utils = types.SimpleNamespace(default_headers=lambda: {})
+    bmesh = types.ModuleType("bmesh")
     mathutils = types.ModuleType("mathutils")
 
     spec = importlib.util.spec_from_file_location(
@@ -48,6 +49,7 @@ def load_addon():
         "bpy": bpy,
         "bpy.props": props,
         "requests": requests,
+        "bmesh": bmesh,
         "mathutils": mathutils,
     }
     with patch.dict(sys.modules, stubs):
