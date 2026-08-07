@@ -8,5 +8,7 @@ except PackageNotFoundError:
     # Package is not installed (e.g. running from a source checkout)
     __version__ = "unknown"
 
-# Expose key classes and functions for easier imports
-from .server import BlenderConnection, get_blender_connection
+# Importing the package must not start or configure the MCP server.
+from .connection import BlenderCommandError, BlenderConnection
+
+__all__ = ["BlenderCommandError", "BlenderConnection", "__version__"]
