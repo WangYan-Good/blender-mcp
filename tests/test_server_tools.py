@@ -314,6 +314,19 @@ class ServerToolTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0)
         self.assertEqual(completed.stderr, "")
 
+    def test_core_server_has_no_remote_telemetry(self):
+        source = Path(server.__file__).read_text(encoding="utf-8").lower()
+
+        for forbidden in (
+            "telemetry",
+            "supabase",
+            "upload_screenshot",
+            "prompt_text",
+            "user_prompt",
+        ):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, source)
+
 
 if __name__ == "__main__":
     unittest.main()

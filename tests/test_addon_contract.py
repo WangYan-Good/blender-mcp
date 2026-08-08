@@ -132,6 +132,20 @@ class AddonContractTests(unittest.TestCase):
 
             self.assertEqual(caught.exception.category, "VALIDATION_ERROR")
 
+    def test_addon_has_no_optional_network_providers(self):
+        source = Path(self.addon.__file__).read_text(encoding="utf-8").lower()
+
+        for forbidden in (
+            "polyhaven",
+            "sketchfab",
+            "hyper3d",
+            "hunyuan",
+            "requests.get",
+            "requests.post",
+        ):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, source)
+
 
 if __name__ == "__main__":
     unittest.main()

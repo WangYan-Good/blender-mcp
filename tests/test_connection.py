@@ -140,6 +140,35 @@ class ConnectionTests(unittest.TestCase):
 
         self.assertTrue(socket.closed)
 
+    def test_local_logs_never_include_script_body(self):
+        marker = "PRIVATE_SCRIPT_MARKER_7f1d6b"
+        response = encode_frame(
+            {
+                "protocol_version": 1,
+                "request_id": "fixed",
+                "success": True,
+                "result": {"success": True},
+            }
+        )
+        socket = ScriptedSocket(response)
+        connection = BlenderConnection(
+            "localhost",
+            9876,
+            socket_factory=lambda *args: socket,
+            request_id_factory=lambda: "fixed",
+        )
+
+        self.connection_logger.disabled = False
+        try:
+            with self.assertLogs("BlenderMCPConnection", level="INFO") as captured:
+                connection.send_command(
+                    "execute_python", {"code": f"result = '{marker}'"}
+                )
+        finally:
+            self.connection_logger.disabled = True
+
+        self.assertNotIn(marker, "\n".join(captured.output))
+
 
 if __name__ == "__main__":
     unittest.main()

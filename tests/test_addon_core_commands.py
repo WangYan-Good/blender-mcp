@@ -1,4 +1,5 @@
 import base64
+import json
 import sys
 import tempfile
 import types
@@ -308,6 +309,71 @@ class AddonCoreCommandTests(unittest.TestCase):
         self.assertEqual(caught.exception.category, "VALIDATION_ERROR")
         self.assertNotIn(code[:100], caught.exception.message)
 
+    def test_execute_python_accepts_exactly_one_mibibyte(self):
+        tail = "\nresult = {'large_script': True}"
+        code = "#" * (self.addon.MAX_CODE_BYTES - len(tail)) + tail
+        self.assertEqual(len(code.encode("utf-8")), self.addon.MAX_CODE_BYTES)
+
+        result = self.server.execute_python(code)
+
+        self.assertEqual(result["result"], {"large_script": True})
+
+    def test_execute_python_limit_counts_utf8_bytes(self):
+        code = "#" * (self.addon.MAX_CODE_BYTES - 2) + "人"
+        self.assertEqual(len(code.encode("utf-8")), self.addon.MAX_CODE_BYTES + 1)
+
+        with self.assertRaises(self.addon.CommandError) as caught:
+            self.server.execute_python(code)
+
+        self.assertEqual(caught.exception.category, "VALIDATION_ERROR")
+
+    def test_execute_python_caps_large_json_result(self):
+        result = self.server.execute_python(
+            "result = chr(0) * (2 * 1024 * 1024)"
+        )
+
+        self.assertTrue(result["result_truncated"])
+        self.assertEqual(result["result_serialized_as"], "repr")
+        self.assertLess(len(result["result"]), 32 * 1024)
+
+    def test_success_response_with_escaped_output_stays_within_frame_budget(self):
+        response = self.server._execute_request(
+            {
+                "protocol_version": 1,
+                "request_id": "large-output",
+                "type": "execute_python",
+                "params": {
+                    "code": "print(chr(0) * (2 * 1024 * 1024))",
+                },
+            }
+        )
+
+        encoded = json.dumps(
+            response, ensure_ascii=False, separators=(",", ":")
+        ).encode("utf-8")
+        self.assertTrue(response["success"])
+        self.assertTrue(response["result"]["stdout_truncated"])
+        self.assertLessEqual(len(encoded), self.addon.MAX_FRAME_BYTES)
+
+    def test_error_response_with_large_message_stays_within_frame_budget(self):
+        response = self.server._execute_request(
+            {
+                "protocol_version": 1,
+                "request_id": "large-error",
+                "type": "execute_python",
+                "params": {
+                    "code": "raise RuntimeError(chr(0) * (2 * 1024 * 1024))",
+                },
+            }
+        )
+
+        encoded = json.dumps(
+            response, ensure_ascii=False, separators=(",", ":")
+        ).encode("utf-8")
+        self.assertFalse(response["success"])
+        self.assertEqual(response["error"]["category"], "BLENDER_ERROR")
+        self.assertLessEqual(len(encoded), self.addon.MAX_FRAME_BYTES)
+
     def test_utf8_capture_truncation_never_returns_partial_character(self):
         text, truncated = self.addon.truncate_utf8("人A", max_bytes=3)
 
@@ -345,6 +411,24 @@ class AddonCoreCommandTests(unittest.TestCase):
         self.assertNotIn("materials", result)
         self.assertNotIn("collections", result)
         self.assertNotIn("cameras", result)
+
+    def test_scene_info_bounds_non_object_data_block_lists(self):
+        fake_bpy = make_fake_bpy()
+        fake_bpy.data.materials = [
+            types.SimpleNamespace(name=f"Material-{index:04d}", use_nodes=False)
+            for index in range(self.addon.MAX_SCENE_ITEMS + 1)
+        ]
+        fake_bpy.data.collections = [
+            types.SimpleNamespace(name=f"Collection-{index:04d}", objects=[])
+            for index in range(self.addon.MAX_SCENE_ITEMS + 1)
+        ]
+        with patch.object(self.addon, "bpy", fake_bpy):
+            result = self.server.get_scene_info(include_objects=False)
+
+        self.assertEqual(len(result["materials"]), self.addon.MAX_SCENE_ITEMS)
+        self.assertEqual(len(result["collections"]), self.addon.MAX_SCENE_ITEMS)
+        self.assertIn("materials", result["truncated_sections"])
+        self.assertIn("collections", result["truncated_sections"])
 
     def test_dispatch_exposes_the_three_core_commands(self):
         fake_bpy = make_fake_bpy()

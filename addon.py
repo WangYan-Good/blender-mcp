@@ -34,6 +34,10 @@ PROTOCOL_VERSION = 1
 MAX_FRAME_BYTES = 8 * 1024 * 1024
 MAX_CODE_BYTES = 1024 * 1024
 MAX_CAPTURE_BYTES = 2 * 1024 * 1024
+MAX_RESULT_JSON_BYTES = 1024 * 1024
+MAX_RESPONSE_STREAM_JSON_BYTES = 512 * 1024
+MAX_RESPONSE_ERROR_JSON_BYTES = 1024 * 1024
+MAX_SCENE_ITEMS = 2000
 HEADER = struct.Struct("!I")
 WORKDIR_ENV = "BLENDER_MCP_WORKDIR"
 WORKDIR_SUBDIRS = ("input", "assets", "projects", "renders", "exports", "scripts")
@@ -162,6 +166,84 @@ def truncate_utf8(text: str, max_bytes: int = MAX_CAPTURE_BYTES) -> tuple[str, b
     if len(encoded) <= max_bytes:
         return text, False
     return encoded[:max_bytes].decode("utf-8", errors="ignore"), True
+
+
+def _json_bytes(value: Any) -> bytes:
+    return json.dumps(
+        value, ensure_ascii=False, separators=(",", ":")
+    ).encode("utf-8")
+
+
+def truncate_json_text(text: str, max_bytes: int) -> tuple[str, bool]:
+    """Bound a string by its encoded JSON size, including escape expansion."""
+    if len(_json_bytes(text)) <= max_bytes:
+        return text, False
+    low, high = 0, len(text)
+    while low < high:
+        midpoint = (low + high + 1) // 2
+        if len(_json_bytes(text[:midpoint])) <= max_bytes:
+            low = midpoint
+        else:
+            high = midpoint - 1
+    return text[:low], True
+
+
+def fit_response_to_frame(response: dict[str, Any]) -> dict[str, Any]:
+    """Preserve diagnostics while guaranteeing the response can be framed."""
+    if len(_json_bytes(response)) <= MAX_FRAME_BYTES:
+        return response
+
+    if response.get("success") and isinstance(response.get("result"), dict):
+        result = response["result"]
+        for field in ("stdout", "stderr"):
+            value = result.get(field)
+            if isinstance(value, str):
+                bounded, truncated = truncate_json_text(
+                    value, MAX_RESPONSE_STREAM_JSON_BYTES
+                )
+                result[field] = bounded
+                if truncated:
+                    result[f"{field}_truncated"] = True
+    elif isinstance(response.get("error"), dict):
+        error = response["error"]
+        details = error.get("details")
+        if not isinstance(details, dict):
+            details = {}
+            error["details"] = details
+        for field in ("message", "traceback"):
+            value = error.get(field)
+            if isinstance(value, str):
+                bounded, truncated = truncate_json_text(
+                    value, MAX_RESPONSE_ERROR_JSON_BYTES
+                )
+                error[field] = bounded
+                if truncated:
+                    details[f"{field}_truncated"] = True
+        for field in ("stdout", "stderr"):
+            value = details.get(field)
+            if isinstance(value, str):
+                bounded, truncated = truncate_json_text(
+                    value, MAX_RESPONSE_STREAM_JSON_BYTES
+                )
+                details[field] = bounded
+                if truncated:
+                    details[f"{field}_truncated"] = True
+
+    if len(_json_bytes(response)) <= MAX_FRAME_BYTES:
+        return response
+    return {
+        "protocol_version": PROTOCOL_VERSION,
+        "request_id": response.get("request_id"),
+        "success": False,
+        "error": {
+            "category": "PROTOCOL_ERROR",
+            "type": "ResponseTooLarge",
+            "message": "Blender response exceeded the transport frame limit",
+            "traceback": None,
+            "retryable": False,
+            "details": {"max_frame_bytes": MAX_FRAME_BYTES},
+        },
+    }
 
 
 class CappedTextBuffer(io.TextIOBase):
@@ -435,21 +517,21 @@ class BlenderMCPServer:
         try:
             validate_request(request)
             result = self._dispatch(request["type"], request["params"])
-            return {
+            response = {
                 "protocol_version": PROTOCOL_VERSION,
                 "request_id": request_id,
                 "success": True,
                 "result": result,
             }
         except CommandError as exc:
-            return {
+            response = {
                 "protocol_version": PROTOCOL_VERSION,
                 "request_id": request_id,
                 "success": False,
                 "error": exc.as_payload(),
             }
         except Exception as exc:
-            return {
+            response = {
                 "protocol_version": PROTOCOL_VERSION,
                 "request_id": request_id,
                 "success": False,
@@ -462,6 +544,7 @@ class BlenderMCPServer:
                     "details": {},
                 },
             }
+        return fit_response_to_frame(response)
 
     def _dispatch(self, command_type: str, params: dict[str, Any]) -> dict[str, Any]:
         handlers: dict[str, Any] = {
@@ -509,19 +592,26 @@ class BlenderMCPServer:
             "image_formats": ["PNG"],
             "max_code_bytes": MAX_CODE_BYTES,
             "max_frame_bytes": MAX_FRAME_BYTES,
+            "max_capture_bytes": MAX_CAPTURE_BYTES,
+            "max_result_json_bytes": MAX_RESULT_JSON_BYTES,
+            "max_scene_items": MAX_SCENE_ITEMS,
         }
 
     @staticmethod
-    def _json_result(value: Any) -> tuple[Any, str]:
+    def _json_result(value: Any) -> tuple[Any, str, bool]:
         try:
-            json.dumps(value, ensure_ascii=False)
-            return value, "json"
+            encoded = _json_bytes(value)
+            if len(encoded) <= MAX_RESULT_JSON_BYTES:
+                return value, "json", False
+            oversized = True
         except (TypeError, ValueError, OverflowError):
-            try:
-                rendered = repr(value)
-            except Exception as exc:
-                rendered = f"<repr failed: {type(exc).__name__}>"
-            return truncate_utf8(rendered, max_bytes=16 * 1024)[0], "repr"
+            oversized = False
+        try:
+            rendered = repr(value)
+        except Exception as exc:
+            rendered = f"<repr failed: {type(exc).__name__}>"
+        rendered, truncated = truncate_json_text(rendered, 16 * 1024)
+        return rendered, "repr", bool(oversized or truncated)
 
     def execute_python(self, code: str) -> dict[str, Any]:
         """Execute unrestricted Python in Blender with bounded diagnostics."""
@@ -562,7 +652,9 @@ class BlenderMCPServer:
                 },
             ) from exc
 
-        result, serialization = self._json_result(namespace.get("result"))
+        result, serialization, result_truncated = self._json_result(
+            namespace.get("result")
+        )
         return {
             "success": True,
             "stdout": stdout.getvalue(),
@@ -571,6 +663,7 @@ class BlenderMCPServer:
             "stderr_truncated": stderr.truncated,
             "result": result,
             "result_serialized_as": serialization,
+            "result_truncated": result_truncated,
             "duration_ms": round((time.monotonic() - started) * 1000, 3),
         }
 
@@ -623,6 +716,17 @@ class BlenderMCPServer:
         scene = bpy.context.scene
         active = bpy.context.view_layer.objects.active
         objects = sorted(scene.objects, key=lambda item: item.name)
+        truncated_sections: list[str] = []
+        if include_objects and len(objects) > max_objects:
+            truncated_sections.append("objects")
+        if include_materials and len(bpy.data.materials) > MAX_SCENE_ITEMS:
+            truncated_sections.append("materials")
+        if include_collections and len(bpy.data.collections) > MAX_SCENE_ITEMS:
+            truncated_sections.append("collections")
+        camera_count = sum(obj.type == "CAMERA" for obj in objects)
+        if include_cameras and camera_count > MAX_SCENE_ITEMS:
+            truncated_sections.append("cameras")
+
         result: dict[str, Any] = {
             "success": True,
             "scene": scene.name,
@@ -634,8 +738,9 @@ class BlenderMCPServer:
             "object_count": len(objects),
             "material_count": len(bpy.data.materials),
             "collection_count": len(bpy.data.collections),
-            "camera_count": sum(obj.type == "CAMERA" for obj in objects),
-            "truncated": bool(include_objects and len(objects) > max_objects),
+            "camera_count": camera_count,
+            "truncated": bool(truncated_sections),
+            "truncated_sections": truncated_sections,
         }
         if include_objects:
             result["objects"] = [
@@ -644,14 +749,16 @@ class BlenderMCPServer:
         if include_materials:
             result["materials"] = [
                 {"name": material.name, "use_nodes": bool(material.use_nodes)}
-                for material in sorted(bpy.data.materials, key=lambda item: item.name)
+                for material in sorted(
+                    bpy.data.materials, key=lambda item: item.name
+                )[:MAX_SCENE_ITEMS]
             ]
         if include_collections:
             result["collections"] = [
                 {"name": collection.name, "object_count": len(collection.objects)}
                 for collection in sorted(
                     bpy.data.collections, key=lambda item: item.name
-                )
+                )[:MAX_SCENE_ITEMS]
             ]
         if include_cameras:
             result["cameras"] = [
@@ -662,7 +769,7 @@ class BlenderMCPServer:
                 }
                 for obj in objects
                 if obj.type == "CAMERA"
-            ]
+            ][:MAX_SCENE_ITEMS]
         return result
 
     def save(
