@@ -1,377 +1,202 @@
+# Blender MCP Core 2.0
 
+Blender MCP Core provides a focused local iteration loop for Blender:
 
-# BlenderMCP - Blender Model Context Protocol Integration
-<a href="https://trendshift.io/repositories/14834?utm_source=repository-badge&amp;utm_medium=badge&amp;utm_campaign=badge-repository-14834" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/repositories/14834" alt="ahujasid%2Fblender-mcp | Trendshift" width="250" height="55"/></a><br />
-[![PyPI Downloads](https://static.pepy.tech/personalized-badge/blender-mcp?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLACK&right_color=GREEN&left_text=downloads)](https://pepy.tech/projects/blender-mcp)
-
-
-BlenderMCP connects Blender to Claude AI through the Model Context Protocol (MCP), allowing Claude to directly interact with and control Blender. This integration enables prompt assisted 3D modeling, scene creation, and manipulation.
-
-**[Official website](https://blendermcp.org/)**
-
-[Full tutorial](https://www.youtube.com/watch?v=lCyQ717DuzQ)
-
-### Join the Community
-
-Give feedback, get inspired, and build on top of the MCP: [Discord](https://discord.gg/SNqPn4TcKQ)
-
-### Supporters
-
-[CodeRabbit](https://www.coderabbit.ai/)
-
-**All supporters:**
-
-[Support this project](https://github.com/sponsors/ahujasid)
-
-## Highlights
-
-For the current version and changelog, see the [releases page](https://github.com/ahujasid/blender-mcp/releases).
-
-- Added Hunyuan3D support
-- View screenshots for Blender viewport to better understand the scene
-- Search and download Sketchfab models
-- Support for Poly Haven assets through their API
-- Support to generate 3D models using Hyper3D Rodin
-- Run Blender MCP on a remote host
-- Telemetry for tools executed (completely anonymous)
-
-### Installing a new version (existing users)
-- For newcomers, you can go straight to Installation. For existing users, see the points below
-- Download the latest addon.py file and replace the older one, then add it to Blender
-- Delete the MCP server from Claude and add it back again, and you should be good to go!
-
-
-## Features
-
-- **Two-way communication**: Connect Claude AI to Blender through a socket-based server
-- **Object manipulation**: Create, modify, and delete 3D objects in Blender
-- **Material control**: Apply and modify materials and colors
-- **Scene inspection**: Get detailed information about the current Blender scene
-- **Code execution**: Run arbitrary Python code in Blender from Claude
-
-## Components
-
-The system consists of two main components:
-
-1. **Blender Addon (`addon.py`)**: A Blender addon that creates a socket server within Blender to receive and execute commands
-2. **MCP Server (`src/blender_mcp/server.py`)**: A Python server that implements the Model Context Protocol and connects to the Blender addon
-
-## Installation
-
-
-### Prerequisites
-
-- Blender 3.0 or newer
-- Python 3.10 or newer
-- uv package manager: 
-
-**If you're on Mac, please install uv as**
-```bash
-brew install uv
+```text
+inspect scene -> execute bpy -> render or capture viewport -> inspect image -> adjust -> repeat
 ```
-**On Windows**
+
+This branch intentionally exposes seven core MCP tools. It targets Windows and
+Blender 5.x and does not preserve the legacy provider or compatibility APIs.
+
+## Requirements
+
+- Windows 10 or 11
+- Blender 5.x running with its graphical interface
+- CPython 3.11 for the MCP server
+- [uv](https://docs.astral.sh/uv/getting-started/installation/)
+
+The package metadata retains a Python 3.10 installation floor, but this release's
+Windows production configuration and real-runtime acceptance target CPython
+3.11. Other interpreter lines have not completed the Windows stdio + Blender
+smoke test.
+
+Install uv from PowerShell, then restart any desktop MCP client so it receives
+the updated `PATH`:
+
 ```powershell
-powershell -c "irm https://astral.sh/uv/install.ps1 | iex" 
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+where.exe uv
 ```
-and then add uv to the user path in Windows (you may need to restart Claude Desktop after):
+
+## Install the Blender add-on
+
+1. In Blender 5, open **Edit > Preferences > Add-ons**.
+2. Choose **Install from Disk** and select this repository's `addon.py`.
+3. Enable **Blender MCP Core**.
+4. In the add-on preferences, set **Workspace** to a dedicated directory such
+   as `D:\BlenderMCP`.
+5. In a 3D View, press `N`, open **BlenderMCP**, and confirm the server is
+   listening on `localhost:9876`. Auto-start is enabled by default; the panel
+   also provides explicit Start and Stop buttons.
+
+The workspace is selected in this order:
+
+1. `BLENDER_MCP_WORKDIR` in the Blender process;
+2. the add-on's Workspace preference;
+3. `%USERPROFILE%\BlenderMCP`.
+
+To use the environment variable, set it before starting Blender and then fully
+restart Blender:
+
 ```powershell
-$localBin = "$env:USERPROFILE\.local\bin"
-$userPath = [Environment]::GetEnvironmentVariable("Path", "User")
-[Environment]::SetEnvironmentVariable("Path", "$userPath;$localBin", "User")
+[Environment]::SetEnvironmentVariable(
+  "BLENDER_MCP_WORKDIR",
+  "D:\BlenderMCP",
+  "User"
+)
 ```
 
-Otherwise installation instructions are on their website: [Install uv](https://docs.astral.sh/uv/getting-started/installation/)
+The add-on creates `input`, `assets`, `projects`, `renders`, `exports`, and
+`scripts` beneath the workspace.
 
-**Linux:** install uv with `curl -LsSf https://astral.sh/uv/install.sh | sh` (it lands in `~/.local/bin`; open a new shell so it's on your PATH). On every OS, use uv's **official installer above — not `pip install uv`**, which may not create the `uvx` command and can hide uv inside an environment your client can't see.
+## Run this checkout as an MCP server
 
-**⚠️ Do not proceed before installing UV**
-
-### Make your client find uvx
-
-MCP clients started from a GUI (Claude Desktop, Cursor, VS Code from the Dock/Start menu) do **not** inherit your terminal's PATH, so a bare `"command": "uvx"` can fail with **`spawn uvx ENOENT`** even though `uvx` works in your terminal. If that happens:
-
-- Find uvx's full path — `which uvx` (macOS/Linux) or `where uvx` (Windows) — and use it as `"command"`, e.g. `/opt/homebrew/bin/uvx` or `C:\Users\<you>\.local\bin\uvx.exe`.
-- On Windows you can instead wrap it: `"command": "cmd", "args": ["/c", "uvx", "blender-mcp"]`.
-- After any PATH or config change, **fully quit and relaunch** the client (Windows: quit from the system tray, not just the window; macOS: Cmd-Q).
-
-### Pin the Python version (avoid conda / pyenv / version conflicts)
-
-uv chooses which Python runs the server. On machines with conda (auto-activated base), pyenv, or asdf — or with a newer CPython release that some dependencies do not have wheels for yet — uv can grab an interpreter that makes installation fail. Pin Python 3.11 and prefer uv-managed interpreters to avoid using whatever is on your PATH:
+Use the current checkout during development. A bare `uvx blender-mcp` may resolve
+an older published release and should not be used to test this source tree.
+Replace both paths below with the output of `where.exe uv` and your clone path:
 
 ```json
 {
-    "mcpServers": {
-        "blender": {
-            "command": "uvx",
-            "args": ["--python", "3.11", "blender-mcp"],
-            "env": { "UV_PYTHON_PREFERENCE": "only-managed" }
-        }
-    }
-}
-```
-
-`--python 3.11` still satisfies this package's `requires-python >=3.10`, and `UV_PYTHON_PREFERENCE=only-managed` keeps uv from selecting conda, pyenv, asdf, or system Python first. (The repo's `.python-version` is only a hint for contributors and does **not** affect `uvx`.) If a previous failed attempt keeps replaying after a fix, clear the cache: `uv cache clean blender-mcp && uvx --refresh blender-mcp`.
-
-### If uv won't work: install without uv
-
-On locked-down machines you can skip uvx entirely with [`pipx`](https://pipx.pypa.io), then point your client at the installed command:
-
-```bash
-pipx install blender-mcp
-pipx ensurepath          # then restart your shell / client
-```
-
-Use the resulting absolute path as `"command"` (find it with `which blender-mcp` / `where blender-mcp`) and omit `args`.
-
-### Environment Variables
-
-The following environment variables can be used to configure the Blender connection:
-
-- `BLENDER_HOST`: Host address for Blender socket server (default: "localhost")
-- `BLENDER_PORT`: Port number for Blender socket server (default: 9876)
-
-Example:
-```bash
-export BLENDER_HOST='host.docker.internal'
-export BLENDER_PORT=9876
-```
-
-### Claude for Desktop Integration
-
-[Watch the setup instruction video](https://www.youtube.com/watch?v=neoK_WMq92g) (Assuming you have already installed uv)
-
-Go to Claude > Settings > Developer > Edit Config > claude_desktop_config.json to include the following:
-
-```json
-{
-    "mcpServers": {
-        "blender": {
-            "command": "uvx",
-            "args": [
-                "blender-mcp"
-            ]
-        }
-    }
-}
-```
-<details>
-<summary>Claude Code</summary>
-
-Use the Claude Code CLI to add the blender MCP server:
-
-```bash
-claude mcp add blender uvx blender-mcp
-```
-</details>
-
-### Cursor integration
-
-[![Install MCP Server](https://cursor.com/deeplink/mcp-install-dark.svg)](https://cursor.com/link/mcp%2Finstall?name=blender&config=eyJjb21tYW5kIjoidXZ4IGJsZW5kZXItbWNwIn0%3D)
-
-For Mac users, go to Settings > MCP and paste the following 
-
-- To use as a global server, use "add new global MCP server" button and paste
-- To use as a project specific server, create `.cursor/mcp.json` in the root of the project and paste
-
-
-```json
-{
-    "mcpServers": {
-        "blender": {
-            "command": "uvx",
-            "args": [
-                "blender-mcp"
-            ]
-        }
-    }
-}
-```
-
-For Windows users, go to Settings > MCP > Add Server, add a new server with the following settings:
-
-```json
-{
-    "mcpServers": {
-        "blender": {
-            "command": "cmd",
-            "args": [
-                "/c",
-                "uvx",
-                "blender-mcp"
-            ]
-        }
-    }
-}
-```
-
-[Cursor setup video](https://www.youtube.com/watch?v=wgWsJshecac)
-
-**⚠️ Only run one instance of the MCP server (either on Cursor or Claude Desktop), not both**
-
-### Visual Studio Code Integration
-
-_Prerequisites_: Make sure you have [Visual Studio Code](https://code.visualstudio.com/) installed before proceeding.
-
-[![Install in VS Code](https://img.shields.io/badge/VS_Code-Install_blender--mcp_server-0098FF?style=flat-square&logo=visualstudiocode&logoColor=ffffff)](vscode:mcp/install?%7B%22name%22%3A%22blender-mcp%22%2C%22type%22%3A%22stdio%22%2C%22command%22%3A%22uvx%22%2C%22args%22%3A%5B%22blender-mcp%22%5D%7D)
-
-### OpenCode integration
-
-```json
-{
-  "mcp": {
-    "blender-mcp": {
-      "type": "local",
-      "command": ["uvx", "blender-mcp"],
-      "enabled": true,
-      "environment": {
-        "BLENDER_HOST": "localhost",
-        "BLENDER_PORT": "9876"
-      }   
+  "mcpServers": {
+    "blender": {
+      "command": "C:\\Users\\YOU\\.local\\bin\\uv.exe",
+      "args": [
+        "--directory",
+        "C:\\Code\\blender-mcp",
+        "run",
+        "--python",
+        "3.11",
+        "blender-mcp"
+      ],
+      "env": {
+        "BLENDER_PORT": "9876",
+        "BLENDER_MCP_TIMEOUT_SECONDS": "600"
+      }
     }
   }
 }
 ```
 
-### Installing the Blender Addon
+Alternatively, build a wheel and run that exact artifact:
 
-1. Download the `addon.py` file from this repo
-1. Open Blender
-2. Go to Edit > Preferences > Add-ons
-3. Click "Install..." and select the `addon.py` file
-4. Enable the addon by checking the box next to "Interface: Blender MCP"
+```powershell
+cd C:\Code\blender-mcp
+uv build
+uvx --python 3.11 --from .\dist\blender_mcp-2.0.0-py3-none-any.whl blender-mcp
+```
 
+For a wheel-based desktop configuration, use the absolute `uvx.exe` path and
+pass `--python`, `3.11`, `--from`, the absolute wheel path, then `blender-mcp`.
 
-## Usage
+## Core tools
 
-### Starting the Connection
-![BlenderMCP in the sidebar](assets/addon-instructions.png)
+| Tool | Main arguments | Result |
+|---|---|---|
+| `get_status` | none | Online/readiness state, versions, current file, workspace, engines, and limits |
+| `execute_python` | `code` | Separate stdout/stderr, JSON result or bounded repr, duration, and full normal-size traceback on failure |
+| `get_scene_info` | include flags, `max_objects` | Deterministic scene, object, transform, mesh, material, collection, and camera summary |
+| `save` | `path`, `overwrite=false`, `compress=true` | Canonical `.blend` path, size, and dirty state |
+| `open` | `path`, `discard_unsaved=false` | Newly opened file and scene summary |
+| `render` | camera, dimensions, engine, output path | Metadata plus inline `image/png` content |
+| `viewport_screenshot` | view, mode, dimensions, output path | Metadata plus inline `image/png` content |
 
-1. In Blender, go to the 3D View sidebar (press N if not visible)
-2. Find the "BlenderMCP" tab
-3. Turn on the Poly Haven checkbox if you want assets from their API (optional)
-4. Click "Connect to Claude"
-5. Make sure the MCP server is running in your terminal
+`viewport_screenshot.view` accepts `CURRENT`, `FRONT`, `BACK`, `LEFT`, `RIGHT`,
+`TOP`, `BOTTOM`, or `CAMERA`. Its mode accepts `WIREFRAME`, `SOLID`, `MATERIAL`,
+or `RENDERED`. Image dimensions must be from 64 through 4096.
 
-### Using with Claude
+A typical agent loop is:
 
-Once the config file has been set on Claude, and the addon is running on Blender, you will see a hammer icon with tools for the Blender MCP.
+1. Call `get_status` and `get_scene_info`.
+2. Use `execute_python` to make one bounded scene change and set a `result`
+   variable with useful structured metadata.
+3. Call `render` or `viewport_screenshot` and inspect the returned image block.
+4. Adjust with another `execute_python` call and repeat.
+5. Call `save` to a path such as `projects/person.blend`.
 
-![BlenderMCP in the sidebar](assets/hammer-icon.png)
+## File and execution safety
 
-#### Capabilities
+Managed file tools (`save`, `open`, `render`, and `viewport_screenshot`) only
+accept canonical paths inside the configured workspace. Parent traversal,
+cross-drive paths, escaping links, wrong extensions, and missing inputs are
+rejected. `save` will not replace an existing file unless `overwrite=true`.
+`open` will not discard dirty work unless `discard_unsaved=true`, and it loads
+files with saved UI state and embedded scripts disabled.
 
-- Get scene and object information 
-- Create, delete and modify shapes
-- Apply or create materials for objects
-- Execute any Python code in Blender
-- Download the right models, assets and HDRIs through [Poly Haven](https://polyhaven.com/)
-- AI generated 3D models through [Hyper3D Rodin](https://hyper3d.ai/)
+`execute_python` is deliberately unrestricted. It runs with Blender's user
+permissions and can read/write files, access the network, start processes, or
+modify any Blender data. Only send trusted code.
 
+Workspace containment prevents ordinary traversal and already-present escaping
+links; it is not an operating-system sandbox against a malicious same-user
+process racing Windows reparse points. Run Blender and the MCP client only with
+trusted local software.
 
-### Example Commands
+The Blender socket listens on localhost without authentication. Any process on
+the same Windows account or machine that can reach port 9876 may request
+unrestricted Python execution. Do not expose or forward this port to a network.
+The MCP bridge always connects to `localhost`; this core release does not accept
+a remote-host override.
 
-Here are some examples of what you can ask Claude to do:
+This core build performs no telemetry and no remote prompt, scene, code, or image
+upload. Local logs contain command type, request ID, frame size, and timing, but
+not Python source. Your MCP client or AI provider may process tool content under
+its own terms.
 
-- "Create a low poly scene in a dungeon, with a dragon guarding a pot of gold" [Demo](https://www.youtube.com/watch?v=DqgKuLYUv00)
-- "Create a beach vibe using HDRIs, textures, and models like rocks and vegetation from Poly Haven" [Demo](https://www.youtube.com/watch?v=I29rn92gkC4)
-- Give a reference image, and create a Blender scene out of it [Demo](https://www.youtube.com/watch?v=FDRb03XPiRo)
-- "Generate a 3D model of a garden gnome through Hyper3D"
-- "Get information about the current scene, and make a threejs sketch from it" [Demo](https://www.youtube.com/watch?v=jxbNI5L7AH8)
-- "Make this car red and metallic" 
-- "Create a sphere and place it above the cube"
-- "Make the lighting like a studio"
-- "Point the camera at the scene, and make it isometric"
+## Limits and defaults
 
-## Hyper3D integration
+- Python source: 1 MiB, measured as UTF-8 bytes
+- Framed Blender protocol message: 8 MiB
+- Captured stdout and stderr: 2 MiB each before transport-budget truncation
+- JSON-safe Python result: 1 MiB; larger results become a bounded repr
+- Scene data-block list: 2,000 items per non-object section
+- Returned PNG file: 32 MiB
+- Blender command timeout: 600 seconds, configurable with
+  `BLENDER_MCP_TIMEOUT_SECONDS`
 
-Hyper3D's free trial key allows you to generate a limited number of models per day. If the daily limit is reached, you can wait for the next day's reset or obtain your own key from hyper3d.ai and fal.ai.
-
-## Persistent API credentials
-
-BlenderMCP supports persistent credentials via Blender Add-on Preferences:
-
-`Edit -> Preferences -> Add-ons -> Blender MCP`
-
-You can store these values there so they survive Blender restarts:
-
-- Sketchfab API Key
-- Hyper3D API Key
-- Hunyuan3D SecretId / SecretKey
-- Hunyuan3D API URL
-
-For headless setups or CI, credentials can also be injected by environment variables:
-
-- `BLENDERMCP_SKETCHFAB_API_KEY`
-- `BLENDERMCP_HYPER3D_API_KEY`
-- `BLENDERMCP_HUNYUAN3D_SECRET_ID`
-- `BLENDERMCP_HUNYUAN3D_SECRET_KEY`
-- `BLENDERMCP_HUNYUAN3D_API_URL`
+Image return in this release is same-machine only: the MCP process reads the PNG
+path produced by Blender, so both processes must share the same filesystem.
 
 ## Troubleshooting
 
-- **Connection issues**: Make sure the Blender addon server is running, and the MCP server is configured on Claude, DO NOT run the uvx command in the terminal. Sometimes, the first command won't go through but after that it starts working.
-- **Timeout errors**: Try simplifying your requests or breaking them into smaller steps
-- **Poly Haven integration**: Claude is sometimes erratic with its behaviour
-- **Have you tried turning it off and on again?**: If you're still having connection errors, try restarting both Claude and the Blender server
+- **Blender is offline / connection refused:** start Blender, enable the add-on,
+  and confirm the sidebar says `localhost:9876`. Match `BLENDER_PORT` if changed.
+- **Protocol version mismatch:** update both `addon.py` and the MCP server from
+  the same checkout, then restart Blender and the desktop client.
+- **No 3D viewport is available:** use Blender's GUI, keep a normal non-quad 3D
+  View open, and avoid running the add-on in background mode.
+- **Viewport GPU failure:** the tool attempts an exact-size screen-area fallback.
+  Restore the Blender window, update GPU drivers, and avoid disconnected RDP
+  sessions if both methods fail.
+- **Render timeout:** reduce samples/resolution or raise
+  `BLENDER_MCP_TIMEOUT_SECONDS`; timed-out mutations are never automatically
+  replayed.
+- **Invalid output path:** use a `.blend` or `.png` path beneath the workspace,
+  for example `projects/person.blend` or `renders/front.png`.
+- **Desktop client cannot find uv:** use the absolute path from `where.exe uv`
+  and fully quit/restart the client after configuration changes.
 
+## Verification status
 
-## Technical Details
+The automated suite verifies the MCP tool contract with an in-memory MCP client;
+the smoke test's `tools/list` step
+verifies the real stdio launch path on the target desktop. Actual GPU drawing,
+`bpy.ops.render`, save/open, and viewport behavior must also pass the
+[Windows + Blender 5.x smoke test](docs/windows-blender-5-smoke-test.md) before
+production use. That real-runtime smoke test is not considered passed until its
+observed results are recorded on a Windows machine with Blender 5.x.
 
-### Communication Protocol
+## License
 
-The system uses a simple JSON-based protocol over TCP sockets:
-
-- **Commands** are sent as JSON objects with a `type` and optional `params`
-- **Responses** are JSON objects with a `status` and `result` or `message`
-
-## Limitations & Security Considerations
-
-- The `execute_blender_code` tool allows running arbitrary Python code in Blender, which can be powerful but potentially dangerous. Use with caution in production environments. ALWAYS save your work before using it.
-- Poly Haven requires downloading models, textures, and HDRI images. If you do not want to use it, please turn it off in the checkbox in Blender. 
-- Complex operations might need to be broken down into smaller steps
-
-
-#### Telemetry Control
-
-BlenderMCP collects anonymous usage data to help improve the tool. You can control telemetry in two ways:
-
-1. **In Blender**: Go to Edit > Preferences > Add-ons > Blender MCP and uncheck the telemetry consent checkbox
-   - With consent (checked): Collects anonymized prompts, code snippets, and screenshots
-   - Without consent (unchecked): Only collects minimal anonymous usage data (tool names, success/failure, duration)
-
-2. **Environment Variable**: Completely disable all telemetry by running:
-```bash
-DISABLE_TELEMETRY=true uvx blender-mcp
-```
-
-Or add it to your MCP config:
-```json
-{
-    "mcpServers": {
-        "blender": {
-            "command": "uvx",
-            "args": ["blender-mcp"],
-            "env": {
-                "DISABLE_TELEMETRY": "true"
-            }
-        }
-    }
-}
-```
-
-All telemetry data is fully anonymized and used solely to improve BlenderMCP.
-
-## Feedback
-
-We are actively looking for feedback on Blender MCP. If you have thoughts, share them [here](https://bit.ly/blender-mcp-form).
-
-If you have more detailed feedback, you can schedule a call with us [here](https://bit.ly/blender-mcp-call) - we will credit you in the project.
-
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
-
-## Disclaimer
-
-This is a third-party integration and not made by Blender. Made by [Siddharth](https://x.com/sidahuj)
+The source is available under the [MIT License](LICENSE). Blender MCP is an
+independent project and is not affiliated with the Blender Foundation.

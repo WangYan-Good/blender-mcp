@@ -21,6 +21,9 @@ batch.
 
 - Blender and the MCP server run on the same Windows machine.
 - Blender 5.x is the primary runtime target.
+- CPython 3.11 is the validated deployment target for the MCP server. Package
+  syntax and dependency metadata retain a 3.10 installation floor, but other
+  interpreter lines are not considered Windows production-validated.
 - Existing public tool signatures do not need to remain compatible.
 - Blender's configured workspace is the authority for managed file operations.
 - `BLENDER_MCP_WORKDIR` overrides the configured workspace. The default is
@@ -43,6 +46,8 @@ batch.
 - The MCP server stays on the maintained 1.x SDK line, pinned to
   `mcp[cli]>=1.28.1,<2`, and uses direct `CallToolResult` values for mixed text
   and image content over stdio.
+- The bridge host is fixed to `localhost`; it cannot send tool parameters to a
+  caller-selected remote Blender endpoint.
 
 ## 3. Architecture
 

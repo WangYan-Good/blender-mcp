@@ -6,12 +6,13 @@
 
 **Architecture:** Replace the unframed socket exchange with serialized, length-prefixed JSON request/response envelopes. Keep Blender API work on Blender's main thread, enforce a Blender-owned workspace for managed file tools, and return structured MCP errors plus mixed text/image results from thin server adapters.
 
-**Tech Stack:** Python 3.10+, Blender 5.x Python API, TCP sockets, MCP Python SDK `mcp[cli]>=1.28.1,<2`, standard-library `unittest`, and Blender GPU off-screen rendering.
+**Tech Stack:** CPython 3.11, Blender 5.x Python API, TCP sockets, MCP Python SDK `mcp[cli]>=1.28.1,<2`, standard-library `unittest`, and Blender GPU off-screen rendering.
 
 ## Global Constraints
 
 - Primary runtime target: Windows and Blender 5.x.
 - Blender and the MCP server run on the same Windows machine.
+- Fix the MCP-side Blender host to `localhost`; do not expose a remote override.
 - Expose exactly these core tools: `get_status`, `execute_python`, `get_scene_info`, `render`, `viewport_screenshot`, `save`, and `open`.
 - Do not preserve compatibility aliases for old core tool signatures.
 - `BLENDER_MCP_WORKDIR` overrides the add-on preference; default to `%USERPROFILE%\BlenderMCP`.
@@ -180,7 +181,7 @@ Use `CallToolResult`, `TextContent`, and `ImageContent` from `mcp.types`. Serial
 
 - [ ] **Step 6: Replace the MCP server with three initial core registrations**
 
-Create one lazily initialized global connection using `BLENDER_HOST`, `BLENDER_PORT`, and `BLENDER_MCP_TIMEOUT_SECONDS`. `set_connection_for_testing` replaces it deterministically. The lifespan only logs local startup/shutdown and disconnects on shutdown; it performs no network request and does not require Blender to be online at MCP startup.
+Create one lazily initialized global localhost connection using `BLENDER_PORT` and `BLENDER_MCP_TIMEOUT_SECONDS`. `set_connection_for_testing` replaces it deterministically. The lifespan only logs local startup/shutdown and disconnects on shutdown; it performs no remote network request and does not require Blender to be online at MCP startup.
 
 ```python
 @mcp.tool(structured_output=False)
@@ -955,7 +956,7 @@ Expected before documentation edits: tests PASS, while `rg` finds stale public d
 
 Document:
 
-- prerequisites: Windows, Blender 5.x, Python 3.10+, and uv;
+- prerequisites: Windows, Blender 5.x, CPython 3.11, and uv;
 - installing `addon.py` from Blender's Add-ons preferences;
 - setting the workdir preference or `BLENDER_MCP_WORKDIR`;
 - the same `uvx --python 3.11 blender-mcp` MCP client configuration pattern;

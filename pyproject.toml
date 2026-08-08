@@ -1,12 +1,10 @@
 [project]
 name = "blender-mcp"
 version = "2.0.0"
-description = "Blender integration through the Model Context Protocol"
+description = "Local Blender 5 core iteration loop through the Model Context Protocol"
 readme = "README.md"
 requires-python = ">=3.10"
-authors = [
-    {name = "Your Name", email = "your.email@example.com"}
-]
+authors = [{name = "BlenderMCP contributors"}]
 license = {text = "MIT"}
 classifiers = [
     "Programming Language :: Python :: 3",
@@ -28,5 +26,5 @@ build-backend = "setuptools.build_meta"
 package-dir = {"" = "src"}
 
 [project.urls]
-"Homepage" = "https://github.com/yourusername/blender-mcp"
-"Bug Tracker" = "https://github.com/yourusername/blender-mcp/issues"
+"Homepage" = "https://github.com/WangYan-Good/blender-mcp"
+"Bug Tracker" = "https://github.com/WangYan-Good/blender-mcp/issues"
