@@ -28,6 +28,10 @@ DEFAULT_HOST = "localhost"
 DEFAULT_PORT = 9876
 DEFAULT_TIMEOUT_SECONDS = 600.0
 MAX_CODE_BYTES = 1024 * 1024
+VIEWPORT_VIEWS = frozenset(
+    {"CURRENT", "FRONT", "BACK", "LEFT", "RIGHT", "TOP", "BOTTOM", "CAMERA"}
+)
+VIEWPORT_MODES = frozenset({"WIREFRAME", "SOLID", "MATERIAL", "RENDERED"})
 
 _blender_connection: Any | None = None
 
@@ -207,6 +211,46 @@ def render(
             "width": width,
             "height": height,
             "engine": engine,
+            "output_path": output_path,
+        },
+    )
+
+
+@mcp.tool(structured_output=False)
+def viewport_screenshot(
+    view: str = "CURRENT",
+    mode: str = "MATERIAL",
+    width: int = 1024,
+    height: int = 1024,
+    output_path: str | None = None,
+) -> CallToolResult:
+    """Capture an oriented 3D viewport and return inline PNG content."""
+    if not isinstance(view, str) or view not in VIEWPORT_VIEWS:
+        return validation_error(
+            f"view must be one of: {', '.join(sorted(VIEWPORT_VIEWS))}"
+        )
+    if not isinstance(mode, str) or mode not in VIEWPORT_MODES:
+        return validation_error(
+            f"mode must be one of: {', '.join(sorted(VIEWPORT_MODES))}"
+        )
+    for name, value in (("width", width), ("height", height)):
+        if type(value) is not int or not 64 <= value <= 4096:
+            return validation_error(
+                f"{name} must be an integer from 64 to 4096"
+            )
+    if output_path is not None and (
+        not isinstance(output_path, str) or not output_path.strip()
+    ):
+        return validation_error(
+            "output_path must be a non-empty string or null"
+        )
+    return _run_image(
+        "viewport_screenshot",
+        {
+            "view": view,
+            "mode": mode,
+            "width": width,
+            "height": height,
             "output_path": output_path,
         },
     )

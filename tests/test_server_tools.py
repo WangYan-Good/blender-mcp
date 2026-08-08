@@ -1,3 +1,4 @@
+import base64
 import tempfile
 import subprocess
 import sys
@@ -8,7 +9,9 @@ from unittest.mock import patch
 import blender_mcp.server as server
 from blender_mcp.connection import BlenderCommandError
 
-PNG = b"\x89PNG\r\n\x1a\n" + b"server-tool-image"
+PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+)
 
 
 class FakeConnection:
@@ -239,7 +242,52 @@ class ServerToolTests(unittest.TestCase):
         )
         self.assertEqual(self.fake.calls, [])
 
-    def test_first_six_core_tools_are_registered_in_this_batch(self):
+    def test_viewport_tool_returns_png_and_forwards_parameters(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            target = root / "renders" / "front.png"
+            target.parent.mkdir()
+            target.write_bytes(PNG)
+            self.fake.response = {
+                "success": True,
+                "image_path": str(target),
+                "workdir": str(root),
+                "view": "FRONT",
+                "mode": "SOLID",
+            }
+
+            result = server.viewport_screenshot(
+                view="FRONT", mode="SOLID", width=800, height=600
+            )
+
+        self.assertFalse(result.isError)
+        self.assertEqual(result.content[1].mimeType, "image/png")
+        self.assertEqual(
+            self.fake.calls,
+            [
+                (
+                    "viewport_screenshot",
+                    {
+                        "view": "FRONT",
+                        "mode": "SOLID",
+                        "width": 800,
+                        "height": 600,
+                        "output_path": None,
+                    },
+                )
+            ],
+        )
+
+    def test_viewport_rejects_unknown_mode_before_contacting_blender(self):
+        result = server.viewport_screenshot(mode="TEXTURED")
+
+        self.assertTrue(result.isError)
+        self.assertEqual(
+            result.structuredContent["error"]["category"], "VALIDATION_ERROR"
+        )
+        self.assertEqual(self.fake.calls, [])
+
+    def test_all_seven_core_tools_are_registered(self):
         names = sorted(tool.name for tool in server.mcp._tool_manager.list_tools())
 
         self.assertEqual(
@@ -251,6 +299,7 @@ class ServerToolTests(unittest.TestCase):
                 "open",
                 "render",
                 "save",
+                "viewport_screenshot",
             ],
         )
 

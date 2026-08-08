@@ -7,7 +7,9 @@ from pathlib import Path
 from blender_mcp.connection import BlenderCommandError
 from blender_mcp.tool_results import error_result, image_result, text_result
 
-PNG = b"\x89PNG\r\n\x1a\n" + b"test-payload"
+PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+)
 
 
 class ToolResultTests(unittest.TestCase):

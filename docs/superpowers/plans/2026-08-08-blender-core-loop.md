@@ -862,7 +862,7 @@ Expected: FAIL on viewport handler and tool assertions.
 
 Search every `bpy.context.window_manager.windows`, then each window screen area, for the first `VIEW_3D` area with a `WINDOW` region. Return `(window, screen, area, region, space, region_3d)`. If none exists, raise `CommandError("BLENDER_ERROR", "No 3D viewport is available; run Blender with its GUI")`.
 
-Snapshot `view_matrix.copy()`, `view_distance`, `view_location.copy()`, `view_rotation.copy()`, `view_perspective`, and `space.shading.type`. Restore all six values in `finally`.
+Snapshot `view_matrix.copy()` for drawing/diagnostics, plus the writable state `view_distance`, `view_location.copy()`, `view_rotation.copy()`, `view_perspective`, `view_camera_offset.copy()`, `view_camera_zoom`, and `space.shading.type`. Restore the writable state in `finally` and call `region_3d.update()`; do not assign the derived view matrix directly. Temporarily disable smooth-view animation and restore that preference too.
 
 - [ ] **Step 4: Apply requested view and shading through a context override**
 
@@ -877,9 +877,9 @@ Do not alter object transforms, selection, active camera, or scene render settin
 
 - [ ] **Step 5: Draw and save an exact-size off-screen PNG**
 
-Create `gpu.types.GPUOffScreen(width, height)`, call `draw_view3d` with scene, view layer, space, region, and the updated view/window matrices, then read `texture_color`. Convert the byte buffer to normalized float pixels using Blender's bundled NumPy, save through a temporary Blender image data-block in PNG format, and remove the image data-block. Always free the GPU off-screen object in `finally`.
+Create `gpu.types.GPUOffScreen(width, height, format="RGBA8")`, call `draw_view3d` with scene, view layer, space, region, and copied updated view/projection matrices, then read `texture_color`. Convert the UBYTE buffer to normalized float pixels using Blender's bundled NumPy, save through a temporary Blender image data-block in PNG format, and remove the image data-block. Always free the GPU off-screen object in `finally`.
 
-If GPU drawing fails, capture the error text and attempt `bpy.ops.screen.screenshot_area(filepath=...)` only inside the valid viewport override. If fallback also fails, raise a `BLENDER_ERROR` that reports both failures. Return `method="gpu_offscreen"` or `method="screen_fallback"` with path, workdir, requested view/mode, dimensions, size, and duration.
+If GPU drawing fails, capture the error text and attempt `bpy.ops.screen.screenshot_area(filepath=..., check_existing=False)` only inside the valid viewport override. Rescale that area capture to the requested dimensions before saving. If fallback also fails, raise a `BLENDER_ERROR` that reports both failures. Return `method="gpu_offscreen"` or `method="screen_fallback"` with path, workdir, requested view/mode, dimensions, size, and duration.
 
 - [ ] **Step 6: Register the seventh MCP tool and freeze the public tool list**
 

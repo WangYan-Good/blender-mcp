@@ -37,6 +37,11 @@ MAX_CAPTURE_BYTES = 2 * 1024 * 1024
 HEADER = struct.Struct("!I")
 WORKDIR_ENV = "BLENDER_MCP_WORKDIR"
 WORKDIR_SUBDIRS = ("input", "assets", "projects", "renders", "exports", "scripts")
+VIEWPORT_VIEWS = frozenset(
+    {"CURRENT", "FRONT", "BACK", "LEFT", "RIGHT", "TOP", "BOTTOM", "CAMERA"}
+)
+VIEWPORT_MODES = frozenset({"WIREFRAME", "SOLID", "MATERIAL", "RENDERED"})
+PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 
 
 class ProtocolError(RuntimeError):
@@ -294,6 +299,24 @@ def resolve_png_output(
     return target
 
 
+def validate_png_output(target: Path) -> int:
+    """Require a non-empty PNG and return its byte size."""
+    if not target.is_file() or target.stat().st_size == 0:
+        raise CommandError(
+            "BLENDER_ERROR", "Blender did not create the requested PNG"
+        )
+    try:
+        with target.open("rb") as image_file:
+            signature = image_file.read(len(PNG_SIGNATURE))
+    except OSError as exc:
+        raise CommandError(
+            "BLENDER_ERROR", "Blender image output could not be read"
+        ) from exc
+    if signature != PNG_SIGNATURE:
+        raise CommandError("BLENDER_ERROR", "Blender image output is not a PNG")
+    return target.stat().st_size
+
+
 def get_addon_preferences(context=None):
     """Return this add-on's preferences when Blender has registered them."""
     context = bpy.context if context is None else context
@@ -448,6 +471,7 @@ class BlenderMCPServer:
             "save": self.save,
             "open": self.open_file,
             "render": self.render,
+            "viewport_screenshot": self.viewport_screenshot,
         }
         handler = handlers.get(command_type)
         if handler is None:
@@ -798,21 +822,7 @@ class BlenderMCPServer:
             operation = bpy.ops.render.render(write_still=True)
             if "FINISHED" not in operation:
                 raise CommandError("BLENDER_ERROR", "Blender render was cancelled")
-            if not target.is_file() or target.stat().st_size == 0:
-                raise CommandError(
-                    "BLENDER_ERROR", "Blender did not create the requested PNG"
-                )
-            try:
-                with target.open("rb") as image_file:
-                    signature = image_file.read(8)
-            except OSError as exc:
-                raise CommandError(
-                    "BLENDER_ERROR", "Blender render could not be read"
-                ) from exc
-            if signature != b"\x89PNG\r\n\x1a\n":
-                raise CommandError(
-                    "BLENDER_ERROR", "Blender render output is not a PNG"
-                )
+            size_bytes = validate_png_output(target)
 
             result = {
                 "success": True,
@@ -822,7 +832,7 @@ class BlenderMCPServer:
                 "height": height,
                 "camera": render_camera.name,
                 "engine": selected_engine,
-                "size_bytes": target.stat().st_size,
+                "size_bytes": size_bytes,
                 "duration_ms": round((time.monotonic() - started) * 1000, 3),
             }
         finally:
@@ -834,6 +844,316 @@ class BlenderMCPServer:
             settings.resolution_percentage = snapshot["resolution_percentage"]
             image_settings.file_format = snapshot["file_format"]
             image_settings.color_mode = snapshot["color_mode"]
+        return result
+
+    @staticmethod
+    def _find_viewport_context():
+        """Find one non-quad VIEW_3D window region suitable for operators."""
+        manager = getattr(bpy.context, "window_manager", None)
+        windows = list(getattr(manager, "windows", ()))
+        current_window = getattr(bpy.context, "window", None)
+        if current_window in windows:
+            windows.remove(current_window)
+            windows.insert(0, current_window)
+        for window in windows:
+            screen = getattr(window, "screen", None)
+            for area in getattr(screen, "areas", ()):
+                if getattr(area, "type", None) != "VIEW_3D":
+                    continue
+                space = getattr(getattr(area, "spaces", None), "active", None)
+                if space is None or getattr(space, "type", None) != "VIEW_3D":
+                    continue
+                if getattr(space, "region_quadviews", None):
+                    continue
+                region = next(
+                    (
+                        item
+                        for item in area.regions
+                        if getattr(item, "type", None) == "WINDOW"
+                    ),
+                    None,
+                )
+                region_3d = getattr(space, "region_3d", None)
+                if region is not None and region_3d is not None:
+                    return window, screen, area, region, space, region_3d
+        raise CommandError(
+            "BLENDER_ERROR",
+            "No 3D viewport is available; run Blender with its GUI",
+        )
+
+    @staticmethod
+    def _snapshot_viewport_state(space, region_3d) -> dict[str, Any]:
+        return {
+            "view_distance": region_3d.view_distance,
+            "view_location": region_3d.view_location.copy(),
+            "view_rotation": region_3d.view_rotation.copy(),
+            "view_perspective": region_3d.view_perspective,
+            "view_camera_zoom": region_3d.view_camera_zoom,
+            "view_camera_offset": region_3d.view_camera_offset.copy(),
+            # This derived matrix is copied for diagnostics/draw consistency,
+            # but restored by updating the writable view properties below.
+            "view_matrix": region_3d.view_matrix.copy(),
+            "shading": space.shading.type,
+        }
+
+    @staticmethod
+    def _restore_viewport_state(space, region_3d, snapshot) -> None:
+        space.shading.type = snapshot["shading"]
+        region_3d.view_distance = snapshot["view_distance"]
+        region_3d.view_location = snapshot["view_location"]
+        region_3d.view_rotation = snapshot["view_rotation"]
+        region_3d.view_perspective = snapshot["view_perspective"]
+        region_3d.view_camera_zoom = snapshot["view_camera_zoom"]
+        region_3d.view_camera_offset = snapshot["view_camera_offset"]
+        region_3d.update()
+
+    @staticmethod
+    def _adapt_projection_aspect(
+        projection_matrix,
+        *,
+        source_width: int,
+        source_height: int,
+        target_width: int,
+        target_height: int,
+    ):
+        """Preserve vertical FOV when off-screen and region aspects differ."""
+        projection = projection_matrix.copy()
+        source_aspect = source_width / max(source_height, 1)
+        target_aspect = target_width / target_height
+        projection[0][0] *= source_aspect / target_aspect
+        return projection
+
+    def _capture_viewport_gpu(
+        self,
+        *,
+        target: Path,
+        width: int,
+        height: int,
+        scene,
+        view_layer,
+        space,
+        region,
+        region_3d,
+        view_matrix,
+        projection_matrix,
+    ) -> None:
+        """Draw one exact-size viewport image through Blender's GPU API."""
+        import gpu
+        import numpy as np
+
+        offscreen = None
+        image = None
+        try:
+            offscreen = gpu.types.GPUOffScreen(width, height, format="RGBA8")
+            offscreen.draw_view3d(
+                scene,
+                view_layer,
+                space,
+                region,
+                view_matrix,
+                projection_matrix,
+                do_color_management=True,
+                draw_background=True,
+            )
+            pixel_buffer = offscreen.texture_color.read()
+            pixels = np.frombuffer(
+                pixel_buffer,
+                dtype=np.uint8,
+                count=width * height * 4,
+            ).astype(np.float32)
+            pixels *= 1.0 / 255.0
+
+            image = bpy.data.images.new(
+                f"BlenderMCP-{uuid.uuid4().hex}",
+                width=width,
+                height=height,
+                alpha=True,
+                float_buffer=False,
+            )
+            image.pixels.foreach_set(pixels)
+            image.file_format = "PNG"
+            image.filepath_raw = str(target)
+            image.update()
+            image.save()
+            validate_png_output(target)
+        finally:
+            if image is not None:
+                bpy.data.images.remove(image)
+            if offscreen is not None:
+                offscreen.free()
+
+    def _capture_viewport_fallback(
+        self,
+        *,
+        target: Path,
+        width: int,
+        height: int,
+        **_context,
+    ) -> None:
+        """Capture a viewport area and resize it to the requested dimensions."""
+        operation = bpy.ops.screen.screenshot_area(
+            filepath=str(target),
+            check_existing=False,
+        )
+        if "FINISHED" not in operation:
+            raise RuntimeError("Blender viewport screenshot was cancelled")
+
+        image = None
+        try:
+            image = bpy.data.images.load(str(target), check_existing=False)
+            if tuple(image.size) != (width, height):
+                image.scale(width, height)
+            image.file_format = "PNG"
+            image.filepath_raw = str(target)
+            image.save()
+            validate_png_output(target)
+        finally:
+            if image is not None:
+                bpy.data.images.remove(image)
+
+    def viewport_screenshot(
+        self,
+        view: str = "CURRENT",
+        mode: str = "MATERIAL",
+        width: int = 1024,
+        height: int = 1024,
+        output_path: str | None = None,
+    ) -> dict[str, Any]:
+        """Capture an oriented and shaded 3D viewport to a managed PNG."""
+        if not isinstance(view, str) or view not in VIEWPORT_VIEWS:
+            raise CommandError(
+                "VALIDATION_ERROR",
+                f"view must be one of: {', '.join(sorted(VIEWPORT_VIEWS))}",
+            )
+        if not isinstance(mode, str) or mode not in VIEWPORT_MODES:
+            raise CommandError(
+                "VALIDATION_ERROR",
+                f"mode must be one of: {', '.join(sorted(VIEWPORT_MODES))}",
+            )
+        validate_image_dimensions(width, height)
+        window, screen, area, region, space, region_3d = (
+            self._find_viewport_context()
+        )
+        if view == "CAMERA" and getattr(window.scene, "camera", None) is None:
+            raise CommandError("NOT_FOUND", "active scene has no camera")
+        workdir = get_configured_workdir()
+        target = resolve_png_output(
+            output_path,
+            workdir=workdir,
+            prefix="viewport",
+        )
+        snapshot = self._snapshot_viewport_state(space, region_3d)
+        view_preferences = getattr(
+            getattr(bpy.context, "preferences", None), "view", None
+        )
+        smooth_view = getattr(view_preferences, "smooth_view", None)
+        started = time.monotonic()
+        method = "gpu_offscreen"
+
+        try:
+            if smooth_view is not None:
+                view_preferences.smooth_view = 0
+            with bpy.context.temp_override(
+                window=window,
+                screen=screen,
+                area=area,
+                region=region,
+            ):
+                scene = bpy.context.scene
+                view_layer = bpy.context.view_layer
+                if view == "CAMERA":
+                    if scene.camera is None:
+                        raise CommandError(
+                            "NOT_FOUND", "active scene has no camera"
+                        )
+                    if region_3d.view_perspective != "CAMERA":
+                        operation = bpy.ops.view3d.view_camera()
+                        if "FINISHED" not in operation:
+                            raise CommandError(
+                                "BLENDER_ERROR", "could not enter camera view"
+                            )
+                elif view != "CURRENT":
+                    operation = bpy.ops.view3d.view_axis(
+                        type=view,
+                        align_active=False,
+                        relative=False,
+                    )
+                    if "FINISHED" not in operation:
+                        raise CommandError(
+                            "BLENDER_ERROR", f"could not apply {view} view"
+                        )
+
+                space.shading.type = mode
+                view_layer.update()
+                region_3d.update()
+                if view == "CAMERA":
+                    view_matrix = scene.camera.matrix_world.inverted()
+                    projection_matrix = scene.camera.calc_matrix_camera(
+                        bpy.context.evaluated_depsgraph_get(),
+                        x=width,
+                        y=height,
+                    )
+                else:
+                    view_matrix = region_3d.view_matrix.copy()
+                    projection_matrix = self._adapt_projection_aspect(
+                        region_3d.window_matrix,
+                        source_width=region.width,
+                        source_height=region.height,
+                        target_width=width,
+                        target_height=height,
+                    )
+
+                capture_context = {
+                    "target": target,
+                    "width": width,
+                    "height": height,
+                    "scene": scene,
+                    "view_layer": view_layer,
+                    "space": space,
+                    "region": region,
+                    "region_3d": region_3d,
+                    "view_matrix": view_matrix,
+                    "projection_matrix": projection_matrix,
+                }
+                try:
+                    self._capture_viewport_gpu(**capture_context)
+                except Exception as gpu_error:
+                    method = "screen_fallback"
+                    try:
+                        self._capture_viewport_fallback(**capture_context)
+                    except Exception as fallback_error:
+                        raise CommandError(
+                            "BLENDER_ERROR",
+                            "GPU and screen viewport capture both failed",
+                            details={
+                                "gpu_error": (
+                                    f"{type(gpu_error).__name__}: {gpu_error}"
+                                ),
+                                "fallback_error": (
+                                    f"{type(fallback_error).__name__}: {fallback_error}"
+                                ),
+                            },
+                        ) from fallback_error
+
+                size_bytes = validate_png_output(target)
+                result = {
+                    "success": True,
+                    "image_path": str(target),
+                    "workdir": str(workdir),
+                    "view": view,
+                    "mode": mode,
+                    "width": width,
+                    "height": height,
+                    "method": method,
+                    "size_bytes": size_bytes,
+                    "duration_ms": round(
+                        (time.monotonic() - started) * 1000, 3
+                    ),
+                }
+        finally:
+            self._restore_viewport_state(space, region_3d, snapshot)
+            if smooth_view is not None:
+                view_preferences.smooth_view = smooth_view
         return result
 
 
