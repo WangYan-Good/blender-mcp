@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import stat
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -27,7 +28,9 @@ class ImageResultError(ValueError):
 
 
 def _json_text(metadata: Mapping[str, Any]) -> str:
-    return json.dumps(dict(metadata), ensure_ascii=False, indent=2)
+    return json.dumps(
+        dict(metadata), ensure_ascii=False, indent=2, allow_nan=False
+    )
 
 
 def text_result(
@@ -63,6 +66,14 @@ def image_result(
         raise ImageResultError(
             "NOT_FOUND", "Blender MCP workspace does not exist"
         ) from exc
+    except OSError as exc:
+        raise ImageResultError(
+            "VALIDATION_ERROR", "Blender MCP workspace could not be resolved"
+        ) from exc
+    if not root.is_dir():
+        raise ImageResultError(
+            "VALIDATION_ERROR", "Blender MCP workspace is not a directory"
+        )
     raw_image_path = metadata.get("image_path")
     if not isinstance(raw_image_path, str) or not raw_image_path:
         raise ImageResultError(
@@ -72,19 +83,40 @@ def image_result(
         image_path = Path(raw_image_path).expanduser().resolve(strict=True)
     except FileNotFoundError as exc:
         raise ImageResultError("NOT_FOUND", "image file does not exist") from exc
+    except OSError as exc:
+        raise ImageResultError(
+            "VALIDATION_ERROR", "image path could not be resolved"
+        ) from exc
     if not _is_within(root, image_path):
         raise ImageResultError(
             "PATH_OUTSIDE_WORKDIR", "image path is outside the Blender MCP workspace"
         )
-    if not image_path.is_file():
-        raise ImageResultError("NOT_FOUND", "image path is not a regular file")
-    size = image_path.stat().st_size
-    if size > MAX_IMAGE_BYTES:
+    try:
+        with image_path.open("rb") as image_file:
+            file_info = os.fstat(image_file.fileno())
+            if not stat.S_ISREG(file_info.st_mode):
+                raise ImageResultError(
+                    "NOT_FOUND", "image path is not a regular file"
+                )
+            if file_info.st_size > MAX_IMAGE_BYTES:
+                raise ImageResultError(
+                    "VALIDATION_ERROR",
+                    f"image is {file_info.st_size} bytes; maximum is {MAX_IMAGE_BYTES}",
+                )
+            image_bytes = image_file.read(MAX_IMAGE_BYTES + 1)
+    except ImageResultError:
+        raise
+    except FileNotFoundError as exc:
+        raise ImageResultError("NOT_FOUND", "image file does not exist") from exc
+    except OSError as exc:
+        raise ImageResultError(
+            "VALIDATION_ERROR", "image file could not be read"
+        ) from exc
+    if len(image_bytes) > MAX_IMAGE_BYTES:
         raise ImageResultError(
             "VALIDATION_ERROR",
-            f"image is {size} bytes; maximum is {MAX_IMAGE_BYTES}",
+            f"image exceeds the {MAX_IMAGE_BYTES} byte maximum",
         )
-    image_bytes = image_path.read_bytes()
     if not image_bytes.startswith(PNG_SIGNATURE):
         raise ImageResultError("VALIDATION_ERROR", "image is not a valid PNG file")
 
@@ -147,7 +179,15 @@ def error_result(error: Exception) -> CallToolResult:
         retryable = False
         request_id = None
         details = {}
-    elif isinstance(error, (ConnectionError, TimeoutError, OSError)):
+    elif isinstance(error, TimeoutError):
+        category = "TIMEOUT"
+        error_type = type(error).__name__
+        message = str(error)
+        traceback_text = None
+        retryable = False
+        request_id = None
+        details = {}
+    elif isinstance(error, (ConnectionError, OSError)):
         category = "CONNECTION_ERROR"
         error_type = type(error).__name__
         message = str(error)

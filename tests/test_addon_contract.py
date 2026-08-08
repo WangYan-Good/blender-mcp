@@ -43,6 +43,12 @@ class AddonContractTests(unittest.TestCase):
 
         self.assertEqual(self.addon.receive_frame(transport), message)
 
+    def test_framed_messages_reject_non_finite_numbers(self):
+        transport = MemorySocket()
+
+        with self.assertRaises(self.addon.ProtocolError):
+            self.addon.send_frame(transport, {"value": float("inf")})
+
     def test_environment_workdir_wins_over_preference(self):
         result = self.addon.resolve_workdir(
             preference="C:/from-preference",

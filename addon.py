@@ -32,6 +32,7 @@ bl_info = {
 
 PROTOCOL_VERSION = 1
 MAX_FRAME_BYTES = 8 * 1024 * 1024
+MAX_REQUEST_ID_BYTES = 128
 MAX_CODE_BYTES = 1024 * 1024
 MAX_CAPTURE_BYTES = 2 * 1024 * 1024
 MAX_RESULT_JSON_BYTES = 1024 * 1024
@@ -54,6 +55,20 @@ class ProtocolError(RuntimeError):
 
 class FrameTooLargeError(ProtocolError):
     """A local socket message exceeded the configured maximum."""
+
+
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"non-finite JSON number is not allowed: {value}")
+
+
+def safe_request_id(value: Any) -> str | None:
+    if (
+        isinstance(value, str)
+        and value
+        and len(value.encode("utf-8")) <= MAX_REQUEST_ID_BYTES
+    ):
+        return value
+    return None
 
 
 class CommandError(RuntimeError):
@@ -105,7 +120,10 @@ def send_frame(sock: socket.socket, message: dict[str, Any]) -> None:
     """Send one length-prefixed UTF-8 JSON object."""
     try:
         payload = json.dumps(
-            message, ensure_ascii=False, separators=(",", ":")
+            message,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            allow_nan=False,
         ).encode("utf-8")
     except (TypeError, ValueError) as exc:
         raise ProtocolError(f"message is not JSON serializable: {exc}") from exc
@@ -124,8 +142,11 @@ def receive_frame(sock: socket.socket) -> dict[str, Any]:
             f"declared frame is {declared_size} bytes; maximum is {MAX_FRAME_BYTES}"
         )
     try:
-        message = json.loads(receive_exact(sock, declared_size).decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        message = json.loads(
+            receive_exact(sock, declared_size).decode("utf-8"),
+            parse_constant=_reject_json_constant,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
         raise ProtocolError(f"invalid frame payload: {exc}") from exc
     if not isinstance(message, dict):
         raise ProtocolError("frame payload must be a JSON object")
@@ -140,10 +161,10 @@ def validate_request(request: dict[str, Any]) -> None:
             "unsupported protocol version",
             error_type="ProtocolError",
         )
-    if not isinstance(request.get("request_id"), str) or not request["request_id"]:
+    if safe_request_id(request.get("request_id")) is None:
         raise CommandError(
             "PROTOCOL_ERROR",
-            "request_id must be a non-empty string",
+            f"request_id must be 1 to {MAX_REQUEST_ID_BYTES} UTF-8 bytes",
             error_type="ProtocolError",
         )
     if not isinstance(request.get("type"), str) or not request["type"]:
@@ -170,7 +191,10 @@ def truncate_utf8(text: str, max_bytes: int = MAX_CAPTURE_BYTES) -> tuple[str, b
 
 def _json_bytes(value: Any) -> bytes:
     return json.dumps(
-        value, ensure_ascii=False, separators=(",", ":")
+        value,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        allow_nan=False,
     ).encode("utf-8")
 
 
@@ -190,8 +214,23 @@ def truncate_json_text(text: str, max_bytes: int) -> tuple[str, bool]:
 
 def fit_response_to_frame(response: dict[str, Any]) -> dict[str, Any]:
     """Preserve diagnostics while guaranteeing the response can be framed."""
-    if len(_json_bytes(response)) <= MAX_FRAME_BYTES:
-        return response
+    try:
+        if len(_json_bytes(response)) <= MAX_FRAME_BYTES:
+            return response
+    except (TypeError, ValueError, OverflowError):
+        return {
+            "protocol_version": PROTOCOL_VERSION,
+            "request_id": safe_request_id(response.get("request_id")),
+            "success": False,
+            "error": {
+                "category": "PROTOCOL_ERROR",
+                "type": "ResponseNotSerializable",
+                "message": "Blender response is not strict JSON",
+                "traceback": None,
+                "retryable": False,
+                "details": {},
+            },
+        }
 
     if response.get("success") and isinstance(response.get("result"), dict):
         result = response["result"]
@@ -233,7 +272,7 @@ def fit_response_to_frame(response: dict[str, Any]) -> dict[str, Any]:
         return response
     return {
         "protocol_version": PROTOCOL_VERSION,
-        "request_id": response.get("request_id"),
+        "request_id": safe_request_id(response.get("request_id")),
         "success": False,
         "error": {
             "category": "PROTOCOL_ERROR",
@@ -425,6 +464,8 @@ class BlenderMCPServer:
         self.socket: socket.socket | None = None
         self.server_thread: threading.Thread | None = None
         self._command_lock = threading.Lock()
+        self._clients: set[socket.socket] = set()
+        self._clients_lock = threading.Lock()
 
     def start(self) -> None:
         if self.running:
@@ -459,6 +500,14 @@ class BlenderMCPServer:
                 listener.close()
             except OSError:
                 pass
+        with self._clients_lock:
+            clients = tuple(self._clients)
+            self._clients.clear()
+        for client in clients:
+            try:
+                client.close()
+            except OSError:
+                pass
         if self.server_thread and self.server_thread.is_alive():
             self.server_thread.join(timeout=1.5)
         self.server_thread = None
@@ -472,6 +521,11 @@ class BlenderMCPServer:
                 continue
             except OSError:
                 break
+            with self._clients_lock:
+                if not self.running:
+                    client.close()
+                    break
+                self._clients.add(client)
             threading.Thread(
                 target=self._client_loop,
                 args=(client,),
@@ -488,11 +542,16 @@ class BlenderMCPServer:
                 except ProtocolError as exc:
                     print(f"Blender MCP protocol error: {exc}")
                     break
+                if not self.running:
+                    break
 
                 completed = threading.Event()
                 response_holder: dict[str, dict[str, Any]] = {}
 
                 def execute_on_main_thread():
+                    if not self.running:
+                        completed.set()
+                        return None
                     with self._command_lock:
                         response_holder["response"] = self._execute_request(request)
                     completed.set()
@@ -507,13 +566,15 @@ class BlenderMCPServer:
         except (ConnectionError, OSError, ProtocolError):
             pass
         finally:
+            with self._clients_lock:
+                self._clients.discard(client)
             try:
                 client.close()
             except OSError:
                 pass
 
     def _execute_request(self, request: dict[str, Any]) -> dict[str, Any]:
-        request_id = request.get("request_id")
+        request_id = safe_request_id(request.get("request_id"))
         try:
             validate_request(request)
             result = self._dispatch(request["type"], request["params"])

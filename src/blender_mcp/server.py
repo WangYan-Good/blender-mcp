@@ -40,7 +40,6 @@ def get_blender_connection() -> Any:
     """Lazily create the local Blender connection."""
     global _blender_connection
     if _blender_connection is None:
-        host = os.getenv("BLENDER_HOST", DEFAULT_HOST)
         port = int(os.getenv("BLENDER_PORT", str(DEFAULT_PORT)))
         timeout_seconds = float(
             os.getenv("BLENDER_MCP_TIMEOUT_SECONDS", str(DEFAULT_TIMEOUT_SECONDS))
@@ -50,7 +49,7 @@ def get_blender_connection() -> Any:
         if timeout_seconds <= 0:
             raise ValueError("BLENDER_MCP_TIMEOUT_SECONDS must be positive")
         _blender_connection = BlenderConnection(
-            host=host, port=port, timeout_seconds=timeout_seconds
+            host=DEFAULT_HOST, port=port, timeout_seconds=timeout_seconds
         )
     return _blender_connection
 

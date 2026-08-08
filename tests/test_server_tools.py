@@ -1,4 +1,5 @@
 import base64
+import os
 import tempfile
 import subprocess
 import sys
@@ -57,6 +58,15 @@ class ServerToolTests(unittest.TestCase):
         )
         self.assertEqual(result.structuredContent["result"], 4)
         self.assertFalse(result.isError)
+
+    def test_connection_is_always_created_for_localhost(self):
+        with patch.object(server, "_blender_connection", None), patch.dict(
+            os.environ, {"BLENDER_HOST": "remote.example"}
+        ), patch.object(server, "BlenderConnection") as constructor:
+            connection = server.get_blender_connection()
+
+        self.assertIs(connection, constructor.return_value)
+        self.assertEqual(constructor.call_args.kwargs["host"], "localhost")
 
     def test_execute_python_rejects_oversize_before_contacting_blender(self):
         result = server.execute_python("#" * (1024 * 1024 + 1))

@@ -248,6 +248,22 @@ class AddonCoreCommandTests(unittest.TestCase):
     def setUp(self):
         self.server = self.addon.BlenderMCPServer()
 
+    def test_stop_closes_all_connected_clients(self):
+        class Client:
+            closed = False
+
+            def close(self):
+                self.closed = True
+
+        client = Client()
+        self.server.running = True
+        self.server._clients.add(client)
+
+        self.server.stop()
+
+        self.assertTrue(client.closed)
+        self.assertEqual(self.server._clients, set())
+
     def test_status_reports_versions_dirty_state_workspace_and_engines(self):
         fake_bpy = make_fake_bpy()
         with tempfile.TemporaryDirectory() as tmp, patch.object(
@@ -336,6 +352,12 @@ class AddonCoreCommandTests(unittest.TestCase):
         self.assertEqual(result["result_serialized_as"], "repr")
         self.assertLess(len(result["result"]), 32 * 1024)
 
+    def test_execute_python_serializes_non_finite_result_as_repr(self):
+        result = self.server.execute_python("result = float('nan')")
+
+        self.assertEqual(result["result"], "nan")
+        self.assertEqual(result["result_serialized_as"], "repr")
+
     def test_success_response_with_escaped_output_stays_within_frame_budget(self):
         response = self.server._execute_request(
             {
@@ -373,6 +395,27 @@ class AddonCoreCommandTests(unittest.TestCase):
         self.assertFalse(response["success"])
         self.assertEqual(response["error"]["category"], "BLENDER_ERROR")
         self.assertLessEqual(len(encoded), self.addon.MAX_FRAME_BYTES)
+
+    def test_maximum_inbound_frame_with_huge_request_id_has_sendable_error(self):
+        request = {
+            "protocol_version": 1,
+            "request_id": "",
+            "type": "get_status",
+            "params": {},
+        }
+        empty_size = len(self.addon._json_bytes(request))
+        request["request_id"] = "x" * (self.addon.MAX_FRAME_BYTES - empty_size)
+        self.assertEqual(
+            len(self.addon._json_bytes(request)), self.addon.MAX_FRAME_BYTES
+        )
+
+        response = self.server._execute_request(request)
+
+        self.assertFalse(response["success"])
+        self.assertIsNone(response["request_id"])
+        self.assertLessEqual(
+            len(self.addon._json_bytes(response)), self.addon.MAX_FRAME_BYTES
+        )
 
     def test_utf8_capture_truncation_never_returns_partial_character(self):
         text, truncated = self.addon.truncate_utf8("人A", max_bytes=3)

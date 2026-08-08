@@ -32,6 +32,11 @@ class ScriptedSocket:
         self.closed = True
 
 
+class TimeoutSocket(ScriptedSocket):
+    def recv(self, _size):
+        raise TimeoutError("Blender command timed out")
+
+
 class ConnectionTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -138,6 +143,50 @@ class ConnectionTests(unittest.TestCase):
         with self.assertRaisesRegex(Exception, "request_id"):
             connection.send_command("get_status")
 
+        self.assertTrue(socket.closed)
+
+    def test_timeout_has_stable_category_request_id_and_invalidates_socket(self):
+        socket = TimeoutSocket(b"")
+        connection = BlenderConnection(
+            "localhost",
+            9876,
+            socket_factory=lambda *args: socket,
+            request_id_factory=lambda: "timeout-request",
+        )
+
+        with self.assertRaises(BlenderCommandError) as caught:
+            connection.send_command("render", {"width": 1024, "height": 1024})
+
+        self.assertEqual(caught.exception.category, "TIMEOUT")
+        self.assertEqual(caught.exception.request_id, "timeout-request")
+        # Blender may still be completing a timed-out mutation, so callers
+        # must not automatically replay it.
+        self.assertFalse(caught.exception.retryable)
+        self.assertTrue(socket.closed)
+
+    def test_malformed_success_is_protocol_error_with_request_id(self):
+        response = encode_frame(
+            {
+                "protocol_version": 1,
+                "request_id": "fixed",
+                "success": True,
+                "result": [],
+            }
+        )
+        socket = ScriptedSocket(response)
+        connection = BlenderConnection(
+            "localhost",
+            9876,
+            socket_factory=lambda *args: socket,
+            request_id_factory=lambda: "fixed",
+        )
+
+        with self.assertRaises(BlenderCommandError) as caught:
+            connection.send_command("get_status")
+
+        self.assertEqual(caught.exception.category, "PROTOCOL_ERROR")
+        self.assertEqual(caught.exception.request_id, "fixed")
+        self.assertFalse(caught.exception.retryable)
         self.assertTrue(socket.closed)
 
     def test_local_logs_never_include_script_body(self):

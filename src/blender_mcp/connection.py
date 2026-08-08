@@ -11,7 +11,13 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-from .protocol import encode_frame, make_request, receive_frame, validate_response
+from .protocol import (
+    ProtocolError,
+    encode_frame,
+    make_request,
+    receive_frame,
+    validate_response,
+)
 
 logger = logging.getLogger("BlenderMCPConnection")
 
@@ -109,9 +115,11 @@ class BlenderConnection:
         with self._lock:
             request_id = self.request_id_factory()
             request = make_request(command_type, params, request_id=request_id)
-            frame = encode_frame(request)
             started = time.monotonic()
+            frame_bytes = 0
             try:
+                frame = encode_frame(request)
+                frame_bytes = len(frame)
                 current = self._ensure_connected()
                 current.sendall(frame)
                 response = validate_response(receive_frame(current), request_id)
@@ -121,27 +129,93 @@ class BlenderConnection:
                     "Blender command succeeded type=%s request_id=%s bytes=%s duration_ms=%.1f",
                     command_type,
                     request_id,
-                    len(frame),
+                    frame_bytes,
                     (time.monotonic() - started) * 1000,
                 )
-                result = response["result"]
-                if not isinstance(result, dict):
-                    raise RuntimeError("Blender command result must be an object")
-                return result
-            except BlenderCommandError:
+                return response["result"]
+            except BlenderCommandError as exc:
                 logger.info(
-                    "Blender command failed type=%s request_id=%s duration_ms=%.1f",
+                    "Blender command failed type=%s request_id=%s bytes=%s category=%s duration_ms=%.1f",
                     command_type,
                     request_id,
+                    frame_bytes,
+                    exc.category,
                     (time.monotonic() - started) * 1000,
                 )
                 raise
-            except Exception:
+            except TimeoutError as exc:
                 self.disconnect()
+                wrapped = BlenderCommandError(
+                    "TIMEOUT",
+                    type(exc).__name__,
+                    str(exc) or "Blender command timed out",
+                    None,
+                    False,
+                    request_id,
+                )
                 logger.info(
-                    "Blender transport failed type=%s request_id=%s duration_ms=%.1f",
+                    "Blender transport failed type=%s request_id=%s bytes=%s category=%s duration_ms=%.1f",
                     command_type,
                     request_id,
+                    frame_bytes,
+                    wrapped.category,
                     (time.monotonic() - started) * 1000,
                 )
-                raise
+                raise wrapped from exc
+            except ProtocolError as exc:
+                self.disconnect()
+                wrapped = BlenderCommandError(
+                    "PROTOCOL_ERROR",
+                    type(exc).__name__,
+                    str(exc),
+                    None,
+                    False,
+                    request_id,
+                )
+                logger.info(
+                    "Blender transport failed type=%s request_id=%s bytes=%s category=%s duration_ms=%.1f",
+                    command_type,
+                    request_id,
+                    frame_bytes,
+                    wrapped.category,
+                    (time.monotonic() - started) * 1000,
+                )
+                raise wrapped from exc
+            except (ConnectionError, OSError) as exc:
+                self.disconnect()
+                wrapped = BlenderCommandError(
+                    "CONNECTION_ERROR",
+                    type(exc).__name__,
+                    str(exc),
+                    None,
+                    True,
+                    request_id,
+                )
+                logger.info(
+                    "Blender transport failed type=%s request_id=%s bytes=%s category=%s duration_ms=%.1f",
+                    command_type,
+                    request_id,
+                    frame_bytes,
+                    wrapped.category,
+                    (time.monotonic() - started) * 1000,
+                )
+                raise wrapped from exc
+            except Exception as exc:
+                self.disconnect()
+                wrapped = BlenderCommandError(
+                    "INTERNAL_ERROR",
+                    type(exc).__name__,
+                    str(exc),
+                    None,
+                    False,
+                    request_id,
+                )
+                logger.info(
+                    "Blender transport failed type=%s request_id=%s bytes=%s category=%s duration_ms=%.1f",
+                    command_type,
+                    request_id,
+                    frame_bytes,
+                    wrapped.category,
+                    (time.monotonic() - started) * 1000,
+                )
+                raise wrapped from exc

@@ -3,6 +3,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from blender_mcp.connection import BlenderCommandError
 from blender_mcp.tool_results import error_result, image_result, text_result
@@ -66,6 +67,22 @@ class ToolResultTests(unittest.TestCase):
 
         self.assertEqual(caught.exception.category, "NOT_FOUND")
 
+    def test_image_read_permission_error_is_local_validation_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            image = root / "renders" / "view.png"
+            image.parent.mkdir()
+            image.write_bytes(PNG)
+
+            with patch.object(Path, "open", side_effect=PermissionError("denied")):
+                with self.assertRaises(ValueError) as caught:
+                    image_result(
+                        {"success": True, "image_path": str(image)},
+                        workdir=str(root),
+                    )
+
+        self.assertEqual(caught.exception.category, "VALIDATION_ERROR")
+
     def test_remote_error_preserves_diagnostics_and_marks_mcp_error(self):
         error = BlenderCommandError(
             "BLENDER_ERROR",
@@ -94,6 +111,13 @@ class ToolResultTests(unittest.TestCase):
             result.structuredContent["error"]["category"], "CONNECTION_ERROR"
         )
         self.assertIsNone(result.structuredContent["error"]["traceback"])
+
+    def test_raw_timeout_is_not_reported_as_a_retryable_connection_error(self):
+        result = error_result(TimeoutError("timed out"))
+
+        self.assertTrue(result.isError)
+        self.assertEqual(result.structuredContent["error"]["category"], "TIMEOUT")
+        self.assertFalse(result.structuredContent["error"]["retryable"])
 
 
 if __name__ == "__main__":
