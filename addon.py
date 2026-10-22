@@ -1405,6 +1405,29 @@ CLASSES = (
 )
 
 
+def _auto_start_server() -> None:
+    """Start the socket server once Blender has a scene.
+
+    Add-ons enabled from saved preferences register before any scene exists,
+    so ``register`` defers auto-start to this one-shot timer.
+    """
+    scene = getattr(bpy.context, "scene", None)
+    if scene is None or not scene.blendermcp_auto_start_server:
+        return None
+    server = getattr(bpy.types, "blendermcp_server", None)
+    if server is not None and server.running:
+        return None
+    if server is None:
+        server = BlenderMCPServer(port=scene.blendermcp_port)
+        bpy.types.blendermcp_server = server
+    try:
+        server.start()
+        scene.blendermcp_server_running = server.running
+    except Exception as exc:
+        print(f"Blender MCP auto-start failed: {exc}")
+    return None
+
+
 def register() -> None:
     for cls in CLASSES:
         bpy.utils.register_class(cls)
@@ -1416,18 +1439,13 @@ def register() -> None:
         name="Auto-start Server", default=True
     )
 
-    scene = getattr(bpy.context, "scene", None)
-    if scene is not None and scene.blendermcp_auto_start_server:
-        server = BlenderMCPServer(port=scene.blendermcp_port)
-        bpy.types.blendermcp_server = server
-        try:
-            server.start()
-            scene.blendermcp_server_running = server.running
-        except Exception as exc:
-            print(f"Blender MCP auto-start failed: {exc}")
+    # Persistent so a .blend opened at launch does not drop the pending start.
+    bpy.app.timers.register(_auto_start_server, first_interval=0.0, persistent=True)
 
 
 def unregister() -> None:
+    if bpy.app.timers.is_registered(_auto_start_server):
+        bpy.app.timers.unregister(_auto_start_server)
     server = getattr(bpy.types, "blendermcp_server", None)
     if server is not None:
         server.stop()
